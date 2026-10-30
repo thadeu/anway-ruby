@@ -1,0 +1,259 @@
+# frozen_string_literal: true
+
+require 'securerandom'
+
+module Anway
+  # Runs jobs until stop, or until the server sends terminate.
+  #
+  # After quiet, the runner stops fetching and stays alive. At a stop, running
+  # jobs get `timeout` seconds to finish. Then Anway::Shutdown is raised in them,
+  # and they get `cancel_grace` seconds to return. Jobs that still run then fail.
+  class Runner
+    BEAT_INTERVAL = 15
+    ERROR_PAUSE = 1
+    EMPTY_FETCH_MINIMUM = 0.2
+    BACKTRACE_LINES = 30
+
+    attr_reader :wid
+
+    def initialize(queues: ['default'], concurrency: 10, timeout: 25, cancel_grace: 5,
+                   labels: [], beat_interval: BEAT_INTERVAL, url: nil, logger: Anway.config.logger)
+      @queues = Queues.new(queues)
+      @concurrency = concurrency
+      @timeout = timeout
+      @cancel_grace = cancel_grace
+      @beat_interval = beat_interval
+      @logger = logger
+      @wid = SecureRandom.hex(12)
+      @fetching = Thread::Queue.new
+      @stopped_beat = Thread::Queue.new
+      @events_reader, @events_writer = IO.pipe
+      @running = {}
+      @lock = Mutex.new
+
+      @client = Client.new(
+        url || Anway.config.url,
+        pool_size: concurrency + 1,
+        timeout: Anway.config.timeout,
+        tls: Anway.config.tls,
+        wid: @wid,
+        labels: ['ruby', *labels]
+      )
+    end
+
+    # Safe in a signal handler.
+    def stop
+      signal('s')
+    end
+
+    # Safe in a signal handler.
+    def quiet
+      signal('q')
+    end
+
+    # Safe in a signal handler.
+    def dump
+      signal('d')
+    end
+
+    def run
+      @client.beat
+
+      @processors = Array.new(@concurrency) { start_processor }
+
+      beat_thread = start_beat
+
+      @logger.info("anway started queues=#{@queues.names.join(',')} concurrency=#{@concurrency}")
+
+      wait_for_stop
+      shutdown
+
+      @stopped_beat.close
+      beat_thread.join
+    ensure
+      @client.close
+    end
+
+    private
+
+    def signal(letter)
+      @events_writer.write_nonblock(letter, exception: false)
+    end
+
+    def wait_for_stop
+      loop do
+        @events_reader.wait_readable
+
+        case @events_reader.read_nonblock(1)
+        when 's' then return
+        when 'q' then stop_fetching
+        when 'd' then dump_threads
+        end
+      end
+    end
+
+    def dump_threads
+      Thread.list.each { |thread| @logger.info("#{thread.inspect}\n#{thread.backtrace&.first(10)&.join("\n")}") }
+    end
+
+    def stop_fetching
+      @fetching.close
+    end
+
+    def fetching?
+      !@fetching.closed?
+    end
+
+    def pause(seconds)
+      @fetching.pop(timeout: seconds)
+    end
+
+    def start_beat
+      Thread.new do
+        state = nil
+
+        until @stopped_beat.closed?
+          @stopped_beat.pop(timeout: @beat_interval)
+
+          break if @stopped_beat.closed?
+
+          state = beat(state)
+        end
+      end
+    end
+
+    def beat(state)
+      case @client.beat(state)
+      when 'quiet'
+        quiet
+
+        'quiet'
+      when 'terminate'
+        stop
+
+        state
+      else
+        state
+      end
+    rescue Error => e
+      @logger.warn("beat failed: #{e.message}")
+
+      state
+    end
+
+    # Shutdown stays pending outside perform, so it cannot break a report.
+    def start_processor
+      Thread.new do
+        Thread.handle_interrupt(Shutdown => :never) { process_loop }
+      end
+    end
+
+    # A fetch in progress is not canceled, because its reply can hold a job.
+    def process_loop
+      while fetching?
+        started = monotonic
+        job = fetch_next
+
+        if job
+          process(job)
+        elsif monotonic - started < EMPTY_FETCH_MINIMUM
+          pause(EMPTY_FETCH_MINIMUM)
+        end
+      end
+    end
+
+    def fetch_next
+      @client.fetch(*@queues.order)
+    rescue Error => e
+      @logger.warn("fetch failed: #{e.message}")
+      pause(ERROR_PAUSE)
+
+      nil
+    end
+
+    def process(job)
+      @lock.synchronize { @running[job.jid] = { job: job, thread: Thread.current } }
+
+      error = perform(job)
+
+      return unless claim(job.jid)
+
+      report(job, error)
+    end
+
+    def perform(job)
+      Thread.handle_interrupt(Shutdown => :immediate) { Executor.call(job) }
+
+      nil
+    rescue Exception => e # rubocop:disable Lint/RescueException
+      notify_error(e, job) unless e.is_a?(Shutdown)
+
+      e
+    end
+
+    def notify_error(error, job)
+      @logger.warn("job failed jid=#{job.jid} jobtype=#{job.type} error=#{error.class}: #{error.message}")
+
+      Anway.config.error_handlers.each { |handler| handler.call(error, job) }
+    rescue StandardError => e
+      @logger.error("error handler failed: #{e.message}")
+    end
+
+    def claim(jid)
+      @lock.synchronize { !@running.delete(jid).nil? }
+    end
+
+    def report(job, error)
+      if error
+        @client.fail(
+          job.jid,
+          errtype: error.class.name,
+          message: error.message,
+          backtrace: error.backtrace&.first(BACKTRACE_LINES) || []
+        )
+      else
+        @client.ack(job.jid)
+      end
+    rescue Error => e
+      @logger.warn("job report failed, the reservation will expire jid=#{job.jid}: #{e.message}")
+    end
+
+    def shutdown
+      stop_fetching if fetching?
+
+      return if join_processors(@timeout)
+
+      running.each { |entry| entry[:thread].raise(Shutdown, 'the worker is stopping') }
+
+      return if join_processors(@cancel_grace)
+
+      running.each { |entry| abandon(entry) }
+    end
+
+    def running
+      @lock.synchronize { @running.values }
+    end
+
+    def abandon(entry)
+      job = entry[:job]
+
+      return unless claim(job.jid)
+
+      @logger.warn("job did not stop jid=#{job.jid} jobtype=#{job.type}")
+
+      entry[:thread].kill
+
+      report(job, Shutdown.new('the worker stopped before the job finished'))
+    end
+
+    def join_processors(limit)
+      deadline = monotonic + limit
+
+      @processors.all? { |thread| thread.join([deadline - monotonic, 0].max) }
+    end
+
+    def monotonic
+      Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    end
+  end
+end

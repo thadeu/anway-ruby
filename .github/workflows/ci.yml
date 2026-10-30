@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  SERVER_VERSION: v0.1.1
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    strategy:
+      fail-fast: false
+      matrix:
+        ruby-version: ['3.4', '4.0']
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: ${{ matrix.ruby-version }}
+          bundler-cache: true
+
+      - name: Download server
+        run: |
+          name="anway-${SERVER_VERSION}-linux-amd64"
+
+          mkdir -p "$RUNNER_TEMP/server"
+          curl -fsSL "https://github.com/thadeu/anway/releases/download/${SERVER_VERSION}/${name}.tar.gz" | tar xz -C "$RUNNER_TEMP/server"
+          echo "SERVER_BIN=$RUNNER_TEMP/server/$name/anway" >> "$GITHUB_ENV"
+
+      - name: Test
+        run: bundle exec rspec

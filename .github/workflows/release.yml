@@ -1,0 +1,82 @@
+# Publishes the gem on a `vX.Y.Z` tag, with RubyGems Trusted Publishing (OIDC).
+# The trusted publisher for the gem `anway` uses the repository
+# thadeu/anway-ruby and the workflow release.yml. No API key is necessary.
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  SERVER_VERSION: v0.1.1
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    permissions:
+      contents: write
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '4.0.7'
+          bundler-cache: true
+
+      - name: Verify tag matches gem version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          gem_version="$(ruby -e 'require_relative "lib/anway/version"; print Anway::VERSION')"
+
+          if [ "$tag" != "$gem_version" ]; then
+            echo "Tag '$tag' does not match gem version '$gem_version'" >&2
+            exit 1
+          fi
+
+          echo "GEM_VERSION=$gem_version" >> "$GITHUB_ENV"
+
+      - name: Download server
+        run: |
+          name="anway-${SERVER_VERSION}-linux-amd64"
+
+          mkdir -p "$RUNNER_TEMP/server"
+          curl -fsSL "https://github.com/thadeu/anway/releases/download/${SERVER_VERSION}/${name}.tar.gz" | tar xz -C "$RUNNER_TEMP/server"
+          echo "SERVER_BIN=$RUNNER_TEMP/server/$name/anway" >> "$GITHUB_ENV"
+
+      - name: Test
+        run: bundle exec rspec
+
+      - name: Build
+        run: gem build anway.gemspec
+
+      # A re-run of the same tag must not fail on "repushing is not allowed".
+      - name: Check whether this version is already on RubyGems
+        id: published
+        run: |
+          status="$(curl -s -o /dev/null -w '%{http_code}' "https://rubygems.org/api/v2/rubygems/anway/versions/${GEM_VERSION}.json")"
+
+          echo "exists=$([ "$status" = "200" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
+      - name: Configure RubyGems trusted publishing credentials
+        if: steps.published.outputs.exists == 'false'
+        uses: rubygems/configure-rubygems-credentials@v2.1.0
+
+      - name: Publish to RubyGems
+        if: steps.published.outputs.exists == 'false'
+        run: gem push "anway-${GEM_VERSION}.gem" < /dev/null
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: anway ${{ env.GEM_VERSION }}
+          generate_release_notes: true
+          files: anway-*.gem

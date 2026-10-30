@@ -1,0 +1,6 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require 'anway/cli'
+
+exit Anway::CLI.new(ARGV).run

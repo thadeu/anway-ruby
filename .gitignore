@@ -1,0 +1,11 @@
+bin/
+.plans/
+.claude/
+.env
+*.gem
+Gemfile.lock
+vendor/
+.bundle/
+spec/dummy/log/
+spec/dummy/tmp/
+spec/dummy/storage/
