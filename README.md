@@ -6,7 +6,7 @@ Ruby and Rails client and worker for [Anway](https://github.com/thadeu/anway). R
 gem 'anway'
 ```
 
-The server address comes from `SERVER_URL`, for example `tcp://:password@localhost:7419`. Use `tcp+tls://` for TLS.
+The server address comes from `ANWAY_URL`, for example `tcp://:password@localhost:7419`. Use `tcp+tls://` for TLS.
 
 ## Worker
 

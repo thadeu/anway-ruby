@@ -12,9 +12,9 @@ module Anway
 
     Endpoint = Data.define(:host, :port, :password, :tls)
 
-    # A blank URL uses SERVER_URL, then the local default.
+    # A blank URL uses ANWAY_URL, then the local default.
     def initialize(url = nil, pool_size: 8, timeout: 10, tls: nil, wid: nil, labels: [])
-      @endpoint = parse_url(url || ENV.fetch('SERVER_URL', nil) || DEFAULT_URL)
+      @endpoint = parse_url(url || ENV.fetch('ANWAY_URL', nil) || DEFAULT_URL)
       @timeout = timeout
       @wid = wid
 

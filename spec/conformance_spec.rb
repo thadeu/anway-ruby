@@ -112,16 +112,16 @@ RSpec.describe 'client conformance' do
     [certificate, key]
   end
 
-  it 'C01 connects with a URL and with SERVER_URL' do
+  it 'C01 connects with a URL and with ANWAY_URL' do
     expect(client.info).to include('server')
 
-    previous = ENV.fetch('SERVER_URL', nil)
-    ENV['SERVER_URL'] = server.url
+    previous = ENV.fetch('ANWAY_URL', nil)
+    ENV['ANWAY_URL'] = server.url
 
     begin
       expect(open_client(nil).info).to include('server')
     ensure
-      ENV['SERVER_URL'] = previous
+      ENV['ANWAY_URL'] = previous
     end
   end
 

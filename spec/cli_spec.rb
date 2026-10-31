@@ -10,7 +10,7 @@ RSpec.describe 'anway command' do
 
   def spawn_cli(url, *args, chdir: root)
     reader, writer = IO.pipe
-    pid = Process.spawn({ 'SERVER_URL' => url }, *ruby_command, *args, chdir: chdir, out: writer, err: writer)
+    pid = Process.spawn({ 'ANWAY_URL' => url }, *ruby_command, *args, chdir: chdir, out: writer, err: writer)
 
     writer.close
     outputs << reader
@@ -71,7 +71,7 @@ RSpec.describe 'anway command' do
   end
 
   it 'exits with 1 when the server is down' do
-    env = { 'SERVER_URL' => 'tcp://127.0.0.1:1' }
+    env = { 'ANWAY_URL' => 'tcp://127.0.0.1:1' }
     _output, status = Open3.capture2e(env, *ruby_command, '-r', 'spec/fixtures/jobs.rb', chdir: root)
 
     expect(status.exitstatus).to eq(1)

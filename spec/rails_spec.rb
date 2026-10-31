@@ -14,7 +14,7 @@ RSpec.describe 'Rails integration' do
     path = File.join(server.dir, 'result')
 
     env = {
-      'SERVER_URL' => server.url,
+      'ANWAY_URL' => server.url,
       'RAILS_ENV' => 'test',
       'DUMMY_DB' => File.join(server.dir, 'dummy.sqlite3'),
       'RUBYOPT' => "-I#{root}/lib"
