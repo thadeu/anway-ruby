@@ -14,6 +14,7 @@ concurrency:
 
 env:
   SERVER_VERSION: v0.1.1
+  RUBYGEMS_OWNER_ID: '103733'
 
 jobs:
   release:
@@ -66,9 +67,31 @@ jobs:
 
           echo "exists=$([ "$status" = "200" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
 
-      - name: Configure RubyGems trusted publishing credentials
+      # The credentials action has no owner input yet, and RubyGems needs the owner
+      # to create a new gem. This step does the same exchange, with the owner.
+      - name: Exchange OIDC token for a RubyGems API key
         if: steps.published.outputs.exists == 'false'
-        uses: rubygems/configure-rubygems-credentials@v2.1.0
+        run: |
+          id_token="$(curl -fsSL -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=rubygems.org" | jq -r .value)"
+
+          echo "::add-mask::$id_token"
+
+          body="$(jq -n --arg jwt "$id_token" --arg owner "$RUBYGEMS_OWNER_ID" '{jwt: $jwt, owner: $owner}')"
+
+          reply="$(curl -sS --fail-with-body -X POST \
+            -H 'content-type: application/json' -H 'accept: application/json' \
+            -d "$body" https://rubygems.org/api/v1/oidc/trusted_publisher/exchange_token)"
+
+          api_key="$(jq -r .rubygems_api_key <<< "$reply")"
+
+          if [ -z "$api_key" ] || [ "$api_key" = "null" ]; then
+            echo "RubyGems did not return an API key" >&2
+            exit 1
+          fi
+
+          echo "::add-mask::$api_key"
+          echo "GEM_HOST_API_KEY=$api_key" >> "$GITHUB_ENV"
 
       - name: Publish to RubyGems
         if: steps.published.outputs.exists == 'false'
