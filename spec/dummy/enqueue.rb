@@ -23,3 +23,10 @@ ActiveRecord::Base.transaction do
 end
 
 puts "after_commit=#{Anway.client.queue_sizes['mailers']}"
+
+require 'anway/testing'
+
+Anway::Testing.fake!
+WriteJob.perform_later("#{path}.fake", 'no')
+puts "wrapped=#{Anway::Testing.jobs.last.custom['wrapped']}"
+Anway::Testing.disable!

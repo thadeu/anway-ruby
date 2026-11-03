@@ -13,7 +13,16 @@ module Anway
       end
     end
 
+    # Pushes from the web go to the same server as the workers: the embedded
+    # one, or the url in config/anway.yml or ANWAY_URL. A url that the app
+    # sets in an initializer wins.
     config.after_initialize do |app|
+      path = app.root.join(Settings::DEFAULT_PATH)
+
+      settings = Settings.load(path: (path.to_s if path.exist?), environment: Rails.env)
+
+      Anway.config.url ||= settings.client_url
+      Anway.config.console_url ||= settings.console_url
       Anway.config.logger = Rails.logger if Rails.logger
       Anway.config.reloader = ->(&block) { app.reloader.wrap(&block) }
 

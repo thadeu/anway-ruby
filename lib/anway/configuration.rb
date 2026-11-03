@@ -4,11 +4,12 @@ require 'logger'
 
 module Anway
   class Configuration
-    attr_accessor :url, :pool_size, :timeout, :tls, :logger, :push_wrapper, :reloader
+    attr_accessor :url, :console_url, :pool_size, :timeout, :tls, :logger, :push_wrapper, :reloader
     attr_reader :middleware, :error_handlers
 
     def initialize
       @url = nil
+      @console_url = nil
       @pool_size = 8
       @timeout = 10
       @tls = nil

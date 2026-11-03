@@ -48,8 +48,10 @@ module ActiveJob
 
       # Each push has a new id. A retry_on attempt keeps its job_id while the
       # first attempt is still reserved, and the server rejects a repeated id.
+      # custom.wrapped names the job class, so that the console shows it, as
+      # Sidekiq does.
       def push(job, options)
-        options = options.merge(queue: job.queue_name, backtrace: BACKTRACE)
+        options = options.merge(queue: job.queue_name, backtrace: BACKTRACE, custom: { 'wrapped' => job.class.name })
 
         # retry_on owns the attempts, so its final error goes to the dead set.
         options[:retry] = DEAD_SET if job.class.anway_retry_on

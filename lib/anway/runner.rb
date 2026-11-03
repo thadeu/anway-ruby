@@ -16,10 +16,16 @@ module Anway
 
     attr_reader :wid
 
-    def initialize(queues: ['default'], concurrency: 10, timeout: 25, cancel_grace: 5,
-                   labels: [], beat_interval: BEAT_INTERVAL, url: nil, logger: Anway.config.logger)
+    # The console shows the worker as hostname:pid with its tag. A nil
+    # hostname uses the machine name. The server can change the thread count
+    # in a BEAT reply, up to limit, such as the database pool size. autoscale,
+    # as { max: n } or { min: n, max: n }, starts the worker with autoscale on.
+    def initialize(queues: ['default'], concurrency: 10, timeout: 25, cancel_grace: 5, labels: [],
+                   hostname: nil, tag: nil, autoscale: nil, limit: nil,
+                   beat_interval: BEAT_INTERVAL, url: nil, logger: Anway.config.logger)
       @queues = Queues.new(queues)
       @concurrency = concurrency
+      @limit = limit
       @timeout = timeout
       @cancel_grace = cancel_grace
       @beat_interval = beat_interval
@@ -30,6 +36,8 @@ module Anway
       @events_reader, @events_writer = IO.pipe
       @running = {}
       @lock = Mutex.new
+      @processors = []
+      @retiring = 0
 
       @client = Client.new(
         url || Anway.config.url,
@@ -37,7 +45,11 @@ module Anway
         timeout: Anway.config.timeout,
         tls: Anway.config.tls,
         wid: @wid,
-        labels: ['ruby', *labels]
+        labels: ['ruby', *labels],
+        identity: {
+          hostname: hostname, tag: tag, queues: @queues.names, concurrency: concurrency,
+          autoscale: autoscale, max_concurrency: limit
+        }
       )
     end
 
@@ -56,10 +68,12 @@ module Anway
       signal('d')
     end
 
+    # The first beat reports the threads, so the server can scale the worker
+    # at once.
     def run
-      @client.beat
+      @client.heartbeat(nil, concurrency: @concurrency)
 
-      @processors = Array.new(@concurrency) { start_processor }
+      @lock.synchronize { @processors = Array.new(@concurrency) { start_processor } }
 
       beat_thread = start_beat
 
@@ -123,7 +137,14 @@ module Anway
     end
 
     def beat(state)
-      case @client.beat(state)
+      reply = @client.heartbeat(state, concurrency: @concurrency)
+
+      # A new count goes to the server at once, not at the next beat, so the
+      # console shows the threads that run, and the next autoscale step starts
+      # from them.
+      @client.heartbeat(state, concurrency: @concurrency) if reply.concurrency && resize(reply.concurrency)
+
+      case reply.state
       when 'quiet'
         quiet
 
@@ -141,6 +162,48 @@ module Anway
       state
     end
 
+    # Starts threads, or asks threads to stop after their job. A stop that is
+    # still pending is canceled first, so the count is right at once. Returns
+    # true when the count changed.
+    def resize(size)
+      return unless size.is_a?(Integer) && size.positive? && fetching?
+
+      size = [size, @limit].min if @limit
+
+      @lock.synchronize do
+        change = size - @concurrency
+
+        return if change.zero?
+
+        if change.positive?
+          kept = [@retiring, change].min
+
+          @retiring -= kept
+          @client.grow_pool(size + 1)
+          @processors.select!(&:alive?)
+          (change - kept).times { @processors << start_processor }
+        else
+          @retiring -= change
+        end
+
+        @concurrency = size
+      end
+
+      @logger.info("anway threads=#{size}")
+
+      true
+    end
+
+    def retire?
+      @lock.synchronize do
+        return false unless @retiring.positive?
+
+        @retiring -= 1
+
+        true
+      end
+    end
+
     # Shutdown stays pending outside perform, so it cannot break a report.
     def start_processor
       Thread.new do
@@ -150,7 +213,7 @@ module Anway
 
     # A fetch in progress is not canceled, because its reply can hold a job.
     def process_loop
-      while fetching?
+      while fetching? && !retire?
         started = monotonic
         job = fetch_next
 
@@ -249,7 +312,9 @@ module Anway
     def join_processors(limit)
       deadline = monotonic + limit
 
-      @processors.all? { |thread| thread.join([deadline - monotonic, 0].max) }
+      threads = @lock.synchronize { @processors.dup }
+
+      threads.all? { |thread| thread.join([deadline - monotonic, 0].max) }
     end
 
     def monotonic

@@ -12,14 +12,18 @@ module Anway
 
     Endpoint = Data.define(:host, :port, :password, :tls)
 
+    # The BEAT reply: the state (nil, "quiet", or "terminate"), and the thread
+    # count that the server wants, or nil.
+    Heartbeat = Data.define(:state, :concurrency)
+
     # A blank URL uses ANWAY_URL, then the local default.
-    def initialize(url = nil, pool_size: 8, timeout: 10, tls: nil, wid: nil, labels: [])
+    def initialize(url = nil, pool_size: 8, timeout: 10, tls: nil, wid: nil, labels: [], identity: {})
       @endpoint = parse_url(url || ENV.fetch('ANWAY_URL', nil) || DEFAULT_URL)
       @timeout = timeout
       @wid = wid
 
       @pool = Pool.new(pool_size) do
-        Connection.new(@endpoint, timeout: timeout, tls: tls, wid: wid, labels: labels)
+        Connection.new(@endpoint, timeout: timeout, tls: tls, wid: wid, labels: labels, identity: identity)
       end
     end
 
@@ -55,9 +59,25 @@ module Anway
 
     # Returns nil, "quiet", or "terminate".
     def beat(current_state = nil)
-      reply = call('BEAT', { wid: @wid, current_state: current_state }.compact)
+      heartbeat(current_state).state
+    end
 
-      reply == 'OK' ? nil : JSON.parse(reply)['state']
+    # Sends BEAT with the thread count of the worker, so the server can ask for
+    # another count. Returns a Heartbeat.
+    def heartbeat(current_state = nil, concurrency: nil)
+      reply = call('BEAT', { wid: @wid, current_state: current_state, concurrency: concurrency }.compact)
+
+      return Heartbeat.new(state: nil, concurrency: nil) if reply == 'OK'
+
+      data = JSON.parse(reply)
+
+      Heartbeat.new(state: data['state'], concurrency: data['concurrency'])
+    end
+
+    # Lets the client hold size connections at once, for a worker that adds
+    # threads.
+    def grow_pool(size)
+      @pool.grow(size)
     end
 
     def info

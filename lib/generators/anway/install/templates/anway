@@ -1,0 +1,12 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# bin/anway             the embedded server, when config/anway.yml has no url, and workers
+# bin/anway server      only the server
+# bin/anway worker      only workers
+Dir.chdir(File.expand_path('..', __dir__))
+
+require_relative '../config/boot'
+require 'anway/cli'
+
+exit Anway::CLI.new(ARGV).run

@@ -11,6 +11,12 @@ require_relative 'anway/worker'
 require_relative 'anway/executor'
 require_relative 'anway/queues'
 require_relative 'anway/runner'
+require_relative 'anway/settings'
+require_relative 'anway/daemon'
+require_relative 'anway/server'
+require_relative 'anway/console'
+require_relative 'anway/web'
+require_relative 'anway/puma/plugin'
 require_relative 'anway/railtie' if defined?(Rails::Railtie)
 
 module Anway

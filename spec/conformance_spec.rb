@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require 'fileutils'
+require 'net/http'
 require 'openssl'
 
 class NoopJob
@@ -330,26 +331,16 @@ RSpec.describe 'worker conformance' do
   it 'W06 fails unfinished jobs at server terminate' do
     BlockingJob.started = false
 
-    current = runner(beat_interval: 0.02, timeout: 0.05, cancel_grace: 0.1)
+    script = TerminatingServer.new(jid: 'blocked', jobtype: 'BlockingJob')
+    current = Anway::Runner.new(url: script.url, concurrency: 1, beat_interval: 0.02, timeout: 0.05, cancel_grace: 0.1)
     thread = run_in_thread(current)
-
-    client.push(Anway::Job.new('BlockingJob'))
 
     wait_for { BlockingJob.started }
 
-    server.signal('INT')
-
     expect(thread.join(5)).not_to be_nil
-
-    server.restart
-
-    fresh = open_client(server.url)
-
-    expect(retries(fresh)).to eq(1)
-
-    fresh.mutate('requeue', 'retries')
-
-    expect(fresh.fetch('default').failure).to include('errtype' => 'Anway::Shutdown')
+    expect(script.failures).to contain_exactly(include('jid' => 'blocked', 'errtype' => 'Anway::Shutdown'))
+  ensure
+    script&.close
   end
 
   it 'W07 lets running jobs finish at a local stop' do
@@ -368,6 +359,91 @@ RSpec.describe 'worker conformance' do
     expect(thread.join(5)).not_to be_nil
     expect(SlowJob.finished).to be(true)
     expect(processed(client)).to eq(1)
+  end
+
+  it 'W11 keeps running across a server restart' do
+    current = runner(beat_interval: 0.05)
+    thread = run_in_thread(current)
+
+    client.push(Anway::Job.new('NoopJob'))
+
+    wait_for { processed(client) == 1 }
+
+    server.stop
+    server.start
+
+    fresh = open_client(server.url)
+
+    fresh.push(Anway::Job.new('NoopJob'))
+
+    wait_for(10) { processed(fresh) == 2 }
+
+    expect(thread).to be_alive
+  end
+
+  it 'W12 starts and stops threads when a beat asks, and a stopping thread finishes its job' do
+    web = "127.0.0.1:#{TCPServer.new('127.0.0.1', 0).then { |socket| socket.addr[1].tap { socket.close } }}"
+    scaled = start_server('WEB_ADDR' => web, 'WEB_TOKEN' => 't')
+    current = Anway::Runner.new(url: scaled.url, concurrency: 1, beat_interval: 0.05)
+    api = Net::HTTP.new(*web.split(':').then { |host, port| [host, port.to_i] })
+
+    view = lambda do
+      body = api.get('/api/v1/workers', 'Authorization' => 'Bearer t').body
+
+      JSON.parse(body)['workers'].find { |worker| worker['wid'] == current.wid }
+    end
+
+    scale = lambda do |count|
+      api.patch("/api/v1/workers/#{current.wid}", JSON.generate(concurrency: count), 'Authorization' => 'Bearer t')
+    end
+
+    alive = -> { current.instance_variable_get(:@processors).count(&:alive?) }
+
+    run_in_thread(current)
+
+    wait_for { view.call&.fetch('scalable') }
+
+    scale.call(3)
+
+    wait_for { view.call['concurrency'] == 3 && view.call['wanted'].nil? }
+
+    expect(alive.call).to eq(3)
+
+    SlowJob.started = SlowJob.finished = false
+    jobs = open_client(scaled.url)
+
+    jobs.push(Anway::Job.new('SlowJob'))
+
+    wait_for { SlowJob.started }
+
+    scale.call(1)
+
+    wait_for(10) { view.call['concurrency'] == 1 && alive.call == 1 }
+
+    expect(SlowJob.finished).to be(true)
+    expect(processed(jobs)).to eq(1)
+  end
+
+  it 'W12 reports a new thread count at once, not at the next beat' do
+    web = "127.0.0.1:#{TCPServer.new('127.0.0.1', 0).then { |socket| socket.addr[1].tap { socket.close } }}"
+    scaled = start_server('WEB_ADDR' => web, 'WEB_TOKEN' => 't')
+    current = Anway::Runner.new(url: scaled.url, concurrency: 1, beat_interval: 2)
+    api = Net::HTTP.new(*web.split(':').then { |host, port| [host, port.to_i] })
+
+    view = lambda do
+      body = api.get('/api/v1/workers', 'Authorization' => 'Bearer t').body
+
+      JSON.parse(body)['workers'].find { |worker| worker['wid'] == current.wid }
+    end
+
+    run_in_thread(current)
+
+    wait_for { view.call&.fetch('scalable') }
+
+    api.patch("/api/v1/workers/#{current.wid}", JSON.generate(concurrency: 3), 'Authorization' => 'Bearer t')
+
+    wait_for(5) { current.instance_variable_get(:@processors).count(&:alive?) == 3 }
+    wait_for(0.5) { view.call['concurrency'] == 3 }
   end
 
   it 'W08 stays alive after quiet and stops fetching' do
@@ -482,6 +558,76 @@ class ScriptedServer
 
     body = %({"state":"#{count > @last_quiet_beat ? 'terminate' : 'quiet'}"})
 
+    "$#{body.bytesize}\r\n#{body}\r\n"
+  end
+end
+
+# TerminatingServer gives out one job, and answers terminate to each beat
+# after that. It records the FAIL commands that it receives.
+class TerminatingServer
+  attr_reader :failures
+
+  def initialize(jid:, jobtype:)
+    @job = JSON.generate('jid' => jid, 'jobtype' => jobtype, 'args' => [], 'queue' => 'default')
+    @given = false
+    @failures = []
+    @lock = Mutex.new
+    @listener = TCPServer.new('127.0.0.1', 0)
+
+    @acceptor = Thread.new do
+      loop { start_connection(@listener.accept) }
+    rescue IOError
+      nil
+    end
+  end
+
+  def url
+    "tcp://127.0.0.1:#{@listener.addr[1]}"
+  end
+
+  def close
+    @listener.close
+    @acceptor.kill
+  end
+
+  private
+
+  def start_connection(socket)
+    Thread.new do
+      socket.write("+HI {\"v\":2}\r\n")
+
+      while (line = socket.gets)
+        verb, payload = line.chomp.split(' ', 2)
+
+        socket.write(reply(verb, payload))
+      end
+    rescue SystemCallError, IOError
+      nil
+    end
+  end
+
+  def reply(verb, payload)
+    case verb
+    when 'FETCH' then fetch_reply
+    when 'BEAT' then @lock.synchronize { @given } ? bulk('{"state":"terminate"}') : "+OK\r\n"
+    when 'FAIL'
+      @lock.synchronize { @failures << JSON.parse(payload) }
+
+      "+OK\r\n"
+    else
+      "+OK\r\n"
+    end
+  end
+
+  def fetch_reply
+    first = @lock.synchronize { !@given && (@given = true) }
+
+    sleep 0.005 unless first
+
+    first ? bulk(@job) : "$-1\r\n"
+  end
+
+  def bulk(body)
     "$#{body.bytesize}\r\n#{body}\r\n"
   end
 end

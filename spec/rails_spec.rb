@@ -24,6 +24,7 @@ RSpec.describe 'Rails integration' do
 
     expect(status.success?).to be(true), output
     expect(output).to include('in_transaction=1').and include('after_commit=2')
+    expect(output).to include('wrapped=WriteJob')
 
     pid = Process.spawn(env, RbConfig.ruby, "#{root}/exe/anway", chdir: dummy, out: File::NULL, err: File::NULL)
 

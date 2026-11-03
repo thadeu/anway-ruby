@@ -12,12 +12,14 @@ module Anway
     PROTOCOL_VERSION = 2
     READ_SIZE = 16_384
 
-    def initialize(endpoint, timeout:, tls: nil, wid: nil, labels: [])
+    # identity holds more HELLO fields of a worker, such as tag, queues, and
+    # concurrency. Its hostname replaces the machine name.
+    def initialize(endpoint, timeout:, tls: nil, wid: nil, labels: [], identity: {})
       @timeout = timeout
       @buffer = String.new(encoding: Encoding::BINARY)
       @io = open_socket(endpoint, tls)
 
-      handshake(endpoint, wid, labels)
+      handshake(endpoint, wid, labels, identity)
     rescue StandardError
       close
 
@@ -82,7 +84,7 @@ module Anway
       end
     end
 
-    def handshake(endpoint, wid, labels)
+    def handshake(endpoint, wid, labels, identity)
       deadline = monotonic + @timeout
       greeting = JSON.parse(read_reply(deadline).delete_prefix('HI '))
 
@@ -95,7 +97,7 @@ module Anway
       end
 
       if wid
-        hello.merge!(wid: wid, hostname: Socket.gethostname, pid: Process.pid, labels: labels)
+        hello.merge!(wid: wid, hostname: Socket.gethostname, pid: Process.pid, labels: labels, **identity.compact)
       end
 
       command('HELLO', hello)

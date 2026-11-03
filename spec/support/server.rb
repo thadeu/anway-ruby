@@ -46,6 +46,18 @@ class TestServer
     start
   end
 
+  # stop asks the server to shut down, as a deploy or a Puma restart does.
+  def stop
+    return unless pid
+
+    Process.kill('INT', pid)
+    Process.wait(pid)
+  rescue Errno::ESRCH, Errno::ECHILD
+    nil
+  ensure
+    @pid = nil
+  end
+
   def cleanup
     kill
     FileUtils.rm_rf(dir)

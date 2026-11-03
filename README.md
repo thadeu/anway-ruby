@@ -11,11 +11,86 @@
 
 Ruby and Rails client and worker for [Anway](https://github.com/thadeu/anway). Ruby 3.4 or later. Rails 8.1 for the Rails integration.
 
-```ruby
-gem 'anway'
+## Install in Rails
+
+```bash
+bundle add anway
+bin/rails generate anway:install
+bin/dev
 ```
 
-The server address comes from `ANWAY_URL`, for example `tcp://:password@localhost:7419`. Use `tcp+tls://` for TLS.
+That is all: no Redis and no migrations. The gem for each platform carries the Anway server, and `bin/dev` starts it with Puma. Add `--active-job` to the installer to use Anway as the Active Job adapter. Without it, Active Job stays as it is, and `include Anway::Worker` works in any class.
+
+The installer writes `config/anway.yml` and `bin/anway`, adds `plugin :anway` to `config/puma.rb`, and adds the console mount to `config/routes.rb` as a comment.
+
+`anway-demo/shop` is a full example app.
+
+## Server: embedded or apart
+
+Without a `url`, the app runs the Anway server itself: the server is **embedded**. With `url` in `config/anway.yml`, or with `ANWAY_URL`, the app uses a server that runs apart, and it runs only workers. Use cases:
+
+1. A Rails app is the server, and runs its own workers and workers from other apps and languages.
+2. A Rails app runs only workers, and the server runs apart.
+
+```yaml
+# config/anway.yml
+queues: [default]
+concurrency: 10
+
+development:
+  server:
+    web: 127.0.0.1:7420     # optional: the HTTP API for the web console
+    web_token: dev
+
+production:
+  url: <%= ENV["ANWAY_URL"] %>
+```
+
+| `server` key | Default | Purpose |
+|---|---|---|
+| `mode` | `embedded`, or `external` with a url | Set it only to override the url rule. `ANWAY_SERVER` also sets it. |
+| `bind` | `127.0.0.1:7419` | Address of the embedded server. Use `0.0.0.0:7419` and a `password` for workers on other hosts. |
+| `data` | `storage/anway` | Data folder of the embedded server |
+| `password` | None | Server password |
+| `web`, `web_token` | Off | HTTP API address and token, for the web console |
+
+Run one server for each deployment. On more than one host, run `bin/anway server` once, or the `ghcr.io/thadeu/anway` image, and set `ANWAY_URL` on every host. Two embedded servers have two separate sets of queues.
+
+`ANWAY_SERVER_PATH` names another server binary. The gem for the `ruby` platform has no server, so it needs `ANWAY_SERVER_PATH` or a url.
+
+The server address comes from the settings, then from `ANWAY_URL`, for example `tcp://:password@localhost:7419`. Use `tcp+tls://` for TLS. `Anway.config.url` in an initializer overrides both.
+
+## Console
+
+```ruby
+# config/routes.rb
+authenticate :user, ->(user) { user.admin? } do
+  mount Anway::Web => "/anway"
+end
+```
+
+```yaml
+# config/anway.yml
+console:
+  path: /path/to/anway-webui
+```
+
+`console.path`, or `ANWAY_CONSOLE_PATH`, names the console binary. `bin/anway`, and so the Puma plugin, then starts the console next to the server, on `127.0.0.1:7421`. With an embedded server, it also opens the server API on `127.0.0.1:7420`, with a random token that only these two processes know.
+
+`Anway::Web` proxies the mount path to the console:
+
+- It keeps the session cookie and `Authorization` in the app.
+- It sends the mount path in `X-Forwarded-Prefix`, so the console links and redirects stay under it.
+- The console accepts form posts only from its own pages, so a form on another site cannot change jobs with an admin's session.
+
+| `console` key | Default | Purpose |
+|---|---|---|
+| `path` | None | Console binary. Without it, no console starts. |
+| `bind` | `127.0.0.1:7421` | Console address, and where `Anway::Web` finds it |
+| `api` | The API of the embedded server | Server API that the console reads, for a server that runs apart |
+| `token` | The server `web_token` | Token for that API |
+
+`bin/anway console` runs only the console. Mount `Anway::Web` only in a route that checks the user: the console can kill and delete jobs.
 
 ## Worker
 
@@ -63,7 +138,24 @@ Tasks in `recurring.yml` and jobs that wait in Solid Queue do not move automatic
 ## Process
 
 ```bash
-bundle exec anway -q critical,mailers,default -c 10
+bundle exec anway                       # the embedded server when there is no url, and workers
+bundle exec anway server                # only the server
+bundle exec anway console               # only the console
+bundle exec anway worker -q mailers     # only workers
+bundle exec anway -C config/anway.yml -q critical,mailers,default -c 10
+```
+
+### Puma
+
+`plugin :anway` in `config/puma.rb` runs `bin/anway` next to Puma, and stops it with Puma. `ANWAY_IN_PUMA` turns it on or off, as `SOLID_QUEUE_IN_PUMA` does. Without it, the plugin runs only in development. If `bin/anway` stops by itself, Puma stops too, so a broken worker is not hidden.
+
+The worker process sets `ANWAY_WORKER=1` before it loads the app.
+
+With Solid Cable 4.1, a code reload in one job thread can deadlock with a broadcast from another job thread. To avoid it, turn off reloading in the worker process in development, and run `bin/rails restart` after a change to a job:
+
+```ruby
+# config/environments/development.rb
+config.enable_reloading = ENV["ANWAY_WORKER"].blank?
 ```
 
 | Flag | Default | Purpose |
@@ -75,6 +167,8 @@ bundle exec anway -q critical,mailers,default -c 10
 | `-C`, `--config` | `config/anway.yml` | YAML config file |
 | `-e`, `--environment` | `RAILS_ENV`, `APP_ENV` | Environment section of the YAML file |
 | `-l`, `--label` | None | Worker label |
+| `-g`, `--tag` | The app folder | Name of the app in the console |
+| `-a`, `--autoscale` | Off | Turn on autoscale, up to this many threads |
 | `-v`, `--verbose` | Off | Debug logs |
 | `-V`, `--version` | | Print the version |
 
@@ -91,6 +185,27 @@ production:
 ```
 
 Flags have priority over the environment section, and the environment section has priority over top-level keys. A list without weights uses strict order.
+
+The console shows each worker process as `hostname:pid`, with its tag, queues, threads, and start time, as Sidekiq does. The hostname is the machine name, and the tag is the app folder (`shop` for `~/code/shop`). To change them:
+
+```yaml
+hostname: worker.1   # or ANWAY_HOSTNAME, for example from the container or dyno name
+tag: shop            # or ANWAY_TAG, or --tag
+```
+
+`ANWAY_HOSTNAME` and `ANWAY_TAG` have priority over the file.
+
+### Threads and autoscale
+
+The console and the server API can change the threads of a running worker. With autoscale, the server adds threads while jobs wait and removes them when the load drops:
+
+```yaml
+concurrency: 10   # the start count, and the autoscale min
+autoscale:
+  max: 40
+```
+
+The worker never runs more threads than its ActiveRecord pool, so make the pool of the worker process as large as `max`. [docs/threads-and-autoscale.md](docs/threads-and-autoscale.md) explains the setup, the console, the API, and problems.
 
 | Signal | Effect |
 |---|---|

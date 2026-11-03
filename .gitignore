@@ -9,3 +9,6 @@ vendor/
 spec/dummy/log/
 spec/dummy/tmp/
 spec/dummy/storage/
+libexec/
+pkg/
+tmp/

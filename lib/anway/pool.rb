@@ -36,6 +36,18 @@ module Anway
       end
     end
 
+    # Adds free slots up to size. A pool does not shrink: a free connection
+    # stays open until close.
+    def grow(size)
+      @lock.synchronize do
+        return if @closed || size <= @size
+
+        @slots.max = size
+        (size - @size).times { @slots.push(Slot.new(nil)) }
+        @size = size
+      end
+    end
+
     def close
       @lock.synchronize do
         return if @closed

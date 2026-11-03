@@ -1,0 +1,32 @@
+# Anway settings. Keys at the top apply to every environment, and an
+# environment section overrides them.
+#
+# Without url, this app runs the Anway server itself (embedded), with its
+# data in storage/anway. Set url, or ANWAY_URL, to use a server that runs
+# apart. On more than one host, run one server and set ANWAY_URL everywhere.
+
+queues: [default]
+concurrency: 10
+
+# The console shows each worker as hostname:pid with a tag. The tag is the
+# app folder by default. ANWAY_HOSTNAME and ANWAY_TAG override these.
+# hostname: worker.1
+# tag: my_app
+
+# Autoscale adds threads while jobs wait, up to max, and removes them when
+# the load drops. Keep max at or below the database pool of the worker.
+# autoscale:
+#   max: 20
+
+# The web console. bin/anway starts it next to the server, and
+# `mount Anway::Web` in config/routes.rb serves it in the app.
+# console:
+#   path: /path/to/anway-webui
+
+production:
+  # url: <%= ENV["ANWAY_URL"] %>
+  #
+  # To accept workers from other hosts on the embedded server:
+  # server:
+  #   bind: 0.0.0.0:7419
+  #   password: <%= ENV["ANWAY_PASSWORD"] %>

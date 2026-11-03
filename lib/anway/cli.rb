@@ -1,8 +1,6 @@
 # frozen_string_literal: true
 
-require 'erb'
 require 'optparse'
-require 'yaml'
 
 # The Railtie registers only when Rails loads before the gem.
 begin
@@ -14,13 +12,17 @@ end
 require 'anway'
 
 module Anway
-  # bundle exec anway -q critical,mailers:2,default -c 10
+  # bundle exec anway                  the embedded server when config/anway.yml has no url, the
+  #                                    console when it sets console.path, and workers
+  # bundle exec anway server           only the server
+  # bundle exec anway console          only the console
+  # bundle exec anway worker -q mail   only workers
   class CLI
     EXIT_OK = 0
     EXIT_BOOT = 1
     EXIT_USAGE = 2
     DEFAULTS = { concurrency: 10, timeout: 25, labels: [] }.freeze
-    DEFAULT_CONFIG = 'config/anway.yml'
+    COMMANDS = %w[server console worker].freeze
     RAILS_ENTRY = 'config/environment.rb'
 
     def initialize(argv)
@@ -34,7 +36,16 @@ module Anway
       return EXIT_OK if parse == :done
 
       boot
-      start
+
+      return Server.new(@settings).exec if @command == 'server'
+      return Console.new(@settings).exec if @command == 'console'
+
+      # The app can tell that it runs in a worker process, for example to turn
+      # off code reloading.
+      ENV['ANWAY_WORKER'] = '1'
+
+      load_app
+      run_workers
       EXIT_OK
     rescue OptionParser::ParseError, ArgumentError => e
       warn("anway: #{e.message}")
@@ -51,6 +62,8 @@ module Anway
     def parse
       parser.parse!(@argv)
 
+      @command = @argv.shift if COMMANDS.include?(@argv.first)
+
       raise ArgumentError, "unexpected argument: #{@argv.first}" unless @argv.empty?
 
       @flags[:done] ? :done : nil
@@ -58,7 +71,7 @@ module Anway
 
     def parser
       OptionParser.new do |options|
-        options.banner = 'Usage: anway [options]'
+        options.banner = 'Usage: anway [server|console|worker] [options]'
 
         options.on('-q', '--queues LIST', 'Queues in order, as name or name:weight') do |list|
           @flags[:queues] = list.split(',').map { |entry| entry.split(':') }
@@ -70,6 +83,8 @@ module Anway
         options.on('-C', '--config PATH', 'YAML config file') { |path| @flags[:config] = path }
         options.on('-e', '--environment NAME', 'Environment name') { |name| @flags[:environment] = name }
         options.on('-l', '--label NAME', 'Worker label') { |name| (@flags[:labels] ||= []) << name }
+        options.on('-g', '--tag NAME', 'Name of the app in the console') { |name| @flags[:tag] = name }
+        options.on('-a', '--autoscale MAX', Integer, 'Turn on autoscale, up to MAX threads') { |n| @flags[:autoscale] = { max: n } }
         options.on('-v', '--verbose', 'Debug logs') { @flags[:verbose] = true }
 
         options.on('-V', '--version', 'Print the version') do
@@ -92,29 +107,27 @@ module Anway
       ENV['RAILS_ENV'] ||= environment
       ENV['APP_ENV'] ||= environment
 
-      @options = DEFAULTS.merge(file_options(environment)).merge(@flags)
-
-      load_app
+      @settings = Settings.load(path: @flags[:config], environment: environment)
+      @options = DEFAULTS.merge(@settings.worker_options).merge(@flags)
 
       Anway.config.logger.level = Logger::DEBUG if @options[:verbose]
-
-      check_database_pool
     end
 
-    def file_options(environment)
-      path = @flags[:config] || DEFAULT_CONFIG
+    # The app loads first, so that a usage error never leaves a server running.
+    # The console stops first, and the server last, so jobs can still report.
+    def run_workers
+      server = Server.new(@settings) if @command.nil? && @settings.embedded?
+      console = Console.new(@settings) if @command.nil? && @settings.console?
 
-      unless File.exist?(path)
-        raise ArgumentError, "config file not found: #{path}" if @flags[:config]
+      begin
+        server&.start
+        console&.start
 
-        return {}
+        start
+      ensure
+        console&.stop
+        server&.stop
       end
-
-      content = YAML.safe_load(ERB.new(File.read(path)).result, aliases: true) || {}
-      section = content.fetch(environment, {})
-      common = content.reject { |_key, value| value.is_a?(Hash) }
-
-      common.merge(section).transform_keys(&:to_sym)
     end
 
     def load_app
@@ -126,28 +139,57 @@ module Anway
       require File.expand_path(path)
 
       Rails.application.eager_load! if defined?(Rails) && Rails.application
+
+      check_database_pool
+    end
+
+    # Each job thread can hold a database connection, so the pool size is the
+    # most threads that the worker runs. Rails connects at the first query, but
+    # the pool exists after boot.
+    def database_pool
+      return nil unless defined?(ActiveRecord::Base)
+
+      ActiveRecord::Base.connection_pool.size
+    rescue StandardError
+      nil
     end
 
     def check_database_pool
-      return unless defined?(ActiveRecord::Base) && ActiveRecord::Base.connected?
+      size = database_pool
 
-      size = ActiveRecord::Base.connection_pool.size
+      return unless size
 
-      return if size >= @options[:concurrency]
+      logger = Anway.config.logger
+      max = @options.dig(:autoscale, :max)
 
-      Anway.config.logger.warn("database pool #{size} is smaller than concurrency #{@options[:concurrency]}")
+      logger.warn("database pool #{size} is smaller than concurrency #{@options[:concurrency]}") if size < @options[:concurrency]
+      logger.warn("autoscale max #{max} is above the database pool #{size}, so the worker runs at most #{size} threads. Raise pool in config/database.yml.") if max && max > size
     end
 
     def start
       runner = Runner.new(
+        url: Anway.config.url || @settings.client_url,
         queues: queues,
         concurrency: @options[:concurrency],
         timeout: @options[:timeout],
-        labels: @options[:labels]
+        labels: @options[:labels],
+        hostname: @options[:hostname],
+        tag: @options[:tag] || default_tag,
+        autoscale: @options[:autoscale],
+        limit: database_pool
       )
 
       trap_signals(runner)
       runner.run
+    end
+
+    # The app folder, as Sidekiq does. A Capistrano release folder has a
+    # number as its name, so the folder above it names the app.
+    def default_tag
+      root = defined?(Rails) && Rails.respond_to?(:root) && Rails.root ? Rails.root.to_s : Dir.pwd
+      name = File.basename(root)
+
+      name.match?(/\A\d+\z/) ? File.basename(File.dirname(File.dirname(root))) : name
     end
 
     def trap_signals(runner)

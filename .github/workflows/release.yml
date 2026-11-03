@@ -13,7 +13,6 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  SERVER_VERSION: v0.1.1
   RUBYGEMS_OWNER_ID: '103733'
 
 jobs:
@@ -47,17 +46,20 @@ jobs:
 
       - name: Download server
         run: |
-          name="anway-${SERVER_VERSION}-linux-amd64"
+          version="v$(ruby -e 'require_relative "lib/anway/version"; print Anway::SERVER_VERSION')"
+          name="anway-${version}-linux-amd64"
 
           mkdir -p "$RUNNER_TEMP/server"
-          curl -fsSL "https://github.com/thadeu/anway/releases/download/${SERVER_VERSION}/${name}.tar.gz" | tar xz -C "$RUNNER_TEMP/server"
+          curl -fsSL "https://github.com/thadeu/anway/releases/download/${version}/${name}.tar.gz" | tar xz -C "$RUNNER_TEMP/server"
           echo "SERVER_BIN=$RUNNER_TEMP/server/$name/anway" >> "$GITHUB_ENV"
 
       - name: Test
         run: bundle exec rspec
 
+      # One gem for the ruby platform, and one with the server for each
+      # platform. Anway::SERVER_VERSION chooses the server.
       - name: Build
-        run: gem build anway.gemspec
+        run: bundle exec rake gems
 
       # A re-run of the same tag must not fail on "repushing is not allowed".
       - name: Check whether this version is already on RubyGems
@@ -95,11 +97,14 @@ jobs:
 
       - name: Publish to RubyGems
         if: steps.published.outputs.exists == 'false'
-        run: gem push "anway-${GEM_VERSION}.gem" < /dev/null
+        run: |
+          for gem in pkg/*.gem; do
+            gem push "$gem" < /dev/null
+          done
 
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
           name: anway ${{ env.GEM_VERSION }}
           generate_release_notes: true
-          files: anway-*.gem
+          files: pkg/*.gem
