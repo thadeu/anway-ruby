@@ -115,6 +115,36 @@ RSpec.describe 'anway command' do
     expect(read_until(reader, 'concurrency=7')).to include('queues=only')
   end
 
+  it 'fetches the subscription queues and runs a published event' do
+    server = start_server
+    client = open_client(server.url)
+    path = File.join(server.dir, 'audited')
+    pid, reader = spawn_cli(server.url, '-r', 'spec/fixtures/topic_jobs.rb')
+
+    startup = read_until(reader, 'anway started')
+
+    expect(startup).to include('anway subscribed topic=file.saved queue=audit jobtype=SavedFileJob')
+    expect(startup).to include('queues=files,audit,default')
+    expect(startup).not_to include('does not fetch')
+    expect(client.publish('file.saved', [path]).jobs).to eq(1)
+
+    wait_for { File.exist?(path) }
+
+    Process.kill('TERM', pid)
+
+    expect(wait_exit(pid)).to eq(0)
+  end
+
+  it 'warns about a subscription queue that a queue list leaves out' do
+    server = start_server
+    _pid, reader = spawn_cli(server.url, '-r', 'spec/fixtures/topic_jobs.rb', '-C', 'spec/fixtures/anway.yml')
+
+    startup = read_until(reader, 'anway started')
+
+    expect(startup).to include('does not fetch queue audit, so the events of topic file.saved wait there')
+    expect(startup).to include('queues=files,default')
+  end
+
   it 'stops fetching at TSTP and stays alive' do
     server = start_server
     client = open_client(server.url)

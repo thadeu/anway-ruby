@@ -16,6 +16,10 @@ module Anway
     # count that the server wants, or nil.
     Heartbeat = Data.define(:state, :concurrency)
 
+    # The PUBLISH reply: the event id, the number of copies, and true when the
+    # server already had an event with this id.
+    Published = Data.define(:event, :jobs, :duplicate)
+
     # A blank URL uses ANWAY_URL, then the local default.
     def initialize(url = nil, pool_size: 8, timeout: 10, tls: nil, wid: nil, labels: [], identity: {})
       @endpoint = parse_url(url || ENV.fetch('ANWAY_URL', nil) || DEFAULT_URL)
@@ -106,6 +110,35 @@ module Anway
       filter = { jobtype: jobtype, jids: jids, regexp: regexp }.compact
 
       call('MUTATE', { cmd: command, target: target, filter: filter })
+
+      true
+    end
+
+    # Sends one event to each subscription of the topic. With an id, a second
+    # publish of the same id within unique_for seconds makes no job, and the
+    # reply has duplicate true. Returns a Published.
+    def publish(topic, args = [], id: nil, unique_for: nil, custom: nil)
+      Job.validate_args!(args)
+
+      event = { topic: topic, args: args, id: id, unique_for: unique_for, custom: custom&.transform_keys(&:to_s) }
+      data = JSON.parse(call('PUBLISH', event.compact))
+
+      Published.new(event: data['event'], jobs: data['jobs'], duplicate: data['duplicate'] == true)
+    end
+
+    # Each event of the topic makes one job of jobtype in queue. A second call
+    # with the same topic, queue, and jobtype sets new retry and reserve_for.
+    def subscribe(topic, queue:, jobtype:, retry: nil, reserve_for: nil)
+      options = { retry: binding.local_variable_get(:retry), reserve_for: reserve_for }
+
+      call('SUBSCRIBE', { topic: topic, queue: queue, jobtype: jobtype, **options }.compact)
+
+      true
+    end
+
+    # A missing subscription is not an error.
+    def unsubscribe(topic, queue:, jobtype:)
+      call('UNSUBSCRIBE', { topic: topic, queue: queue, jobtype: jobtype })
 
       true
     end

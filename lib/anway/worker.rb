@@ -12,8 +12,23 @@ module Anway
   #   end
   #
   #   WelcomeJob.perform_async(42)
+  #
+  # A class can also run the events of a topic:
+  #
+  #   class BroadcastMessage
+  #     include Anway::Worker
+  #
+  #     subscribe 'chat.message', queue: 'realtime'
+  #
+  #     def perform(message); end
+  #   end
   module Worker
     DEFAULT_BACKTRACE = 30
+    SUBSCRIBE_OPTIONS = %i[retry reserve_for].freeze
+
+    # One topic, queue, and job type. retry and reserve_for are the options of
+    # each copy.
+    Subscription = Data.define(:topic, :queue, :jobtype, :retry, :reserve_for)
 
     @registry = {}
     @lock = Mutex.new
@@ -34,6 +49,12 @@ module Anway
 
       def classes
         @lock.synchronize { @registry.values }
+      end
+
+      # The subscriptions of all registered classes. A worker sends them with
+      # SUBSCRIBE when it starts.
+      def subscriptions
+        classes.flat_map(&:subscriptions).uniq
       end
 
       # Only registered classes run. The job type comes from the network, so it
@@ -81,6 +102,35 @@ module Anway
         @job_options = (@job_options || {}).merge(options) if options
 
         inherited_options.merge(@job_options || {})
+      end
+
+      # Runs each event of the topic in this class. The job type is the job
+      # type of the class. queue, retry, and reserve_for have the job_options
+      # of the class as defaults, read when the worker starts. A subclass does
+      # not get the subscriptions of its parent.
+      def subscribe(topic, queue: nil, **options)
+        unknown = options.keys - SUBSCRIBE_OPTIONS
+
+        raise ArgumentError, "unknown subscribe options: #{unknown.join(', ')}" if unknown.any?
+
+        entry = { topic: topic.to_s, queue: queue&.to_s, **options }
+
+        @subscriptions ||= []
+        @subscriptions << entry unless @subscriptions.include?(entry)
+      end
+
+      def subscriptions
+        defaults = job_options
+
+        (@subscriptions || []).map do |entry|
+          Subscription.new(
+            topic: entry[:topic],
+            queue: entry[:queue] || defaults[:queue]&.to_s || 'default',
+            jobtype: job_type,
+            retry: entry.fetch(:retry, defaults[:retry]),
+            reserve_for: entry.fetch(:reserve_for, defaults[:reserve_for])
+          )
+        end
       end
 
       def perform_async(*args)

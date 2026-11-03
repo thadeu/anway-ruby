@@ -199,11 +199,14 @@ module Anway
       Signal.trap('TTIN') { runner.dump }
     end
 
-    # Without a list, the worker uses the queues of its job classes.
+    # Without a list, the worker uses the queues of its job classes and of
+    # their subscriptions. With a list, the runner logs a warning for each
+    # subscription queue that is not in it.
     def queues
       return @options[:queues] if @options[:queues]
 
       names = Worker.classes.map { |klass| klass.job_options[:queue]&.to_s }
+      names.concat(Worker.subscriptions.map(&:queue))
       names.concat(active_job_queues)
 
       [*names.compact, 'default'].uniq

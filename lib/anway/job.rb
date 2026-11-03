@@ -10,6 +10,31 @@ module Anway
 
     attr_accessor :jid, :type, :args, :custom, *ATTRIBUTES.map(&:to_sym)
 
+    # Other languages read job args, so only JSON types with string hash keys
+    # are valid. Topic events use the same rule.
+    def self.validate_args!(args)
+      raise ArgumentError, "job args must be an array: #{args.inspect}" unless args.is_a?(Array)
+
+      validate_json!(args)
+    end
+
+    def self.validate_json!(value)
+      case value
+      when nil, true, false, String, Integer, Float
+        nil
+      when Array
+        value.each { |item| validate_json!(item) }
+      when Hash
+        value.each do |key, item|
+          raise ArgumentError, "job hash keys must be strings: #{key.inspect}" unless key.is_a?(String)
+
+          validate_json!(item)
+        end
+      else
+        raise ArgumentError, "job args must be JSON types: #{value.inspect}"
+      end
+    end
+
     def self.from_hash(hash)
       job = allocate
 
@@ -25,7 +50,7 @@ module Anway
 
     # Options: queue, retry, reserve_for, backtrace, at, custom, jid.
     def initialize(type, args = [], **options)
-      validate_json!(args)
+      self.class.validate_json!(args)
 
       @jid = options[:jid] || SecureRandom.hex(12)
       @type = type
@@ -56,26 +81,6 @@ module Anway
         'jid' => jid, 'jobtype' => type, 'args' => args, 'custom' => custom,
         **ATTRIBUTES.to_h { |name| [name, public_send(name)] }
       }.compact
-    end
-
-    private
-
-    # Other languages read these args, so only JSON types are valid.
-    def validate_json!(value)
-      case value
-      when nil, true, false, String, Integer, Float
-        nil
-      when Array
-        value.each { |item| validate_json!(item) }
-      when Hash
-        value.each do |key, item|
-          raise ArgumentError, "job hash keys must be strings: #{key.inspect}" unless key.is_a?(String)
-
-          validate_json!(item)
-        end
-      else
-        raise ArgumentError, "job args must be JSON types: #{value.inspect}"
-      end
     end
   end
 end

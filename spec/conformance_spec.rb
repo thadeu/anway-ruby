@@ -3,6 +3,7 @@
 require 'fileutils'
 require 'net/http'
 require 'openssl'
+require 'stringio'
 
 class NoopJob
   include Anway::Worker
@@ -85,6 +86,50 @@ class StuckJob
     end
 
     self.class.returned = true
+  end
+end
+
+class PaidOrderJob
+  include Anway::Worker
+
+  subscribe 'order.paid', queue: 'billing'
+
+  class << self
+    attr_accessor :received
+  end
+
+  def perform(order)
+    self.class.received << [order, job.custom['event']]
+  end
+end
+
+class StoreMessageJob
+  include Anway::Worker
+
+  job_options queue: 'store'
+  subscribe 'chat.message'
+
+  class << self
+    attr_accessor :received
+  end
+
+  def perform(message)
+    self.class.received << message
+  end
+end
+
+class NotifyMessageJob
+  include Anway::Worker
+
+  job_options queue: 'notify'
+  subscribe 'chat.message'
+
+  class << self
+    attr_accessor :received
+  end
+
+  def perform(message)
+    self.class.received << message
   end
 end
 
@@ -281,6 +326,78 @@ RSpec.describe 'client conformance' do
 
     expect { closed.push(Anway::Job.new('x')) }.to raise_error(Anway::Closed)
   end
+
+  it 'T01 publishes one copy to each subscription' do
+    client.subscribe('chat.message', queue: 'realtime', jobtype: 'chat.broadcast')
+    client.subscribe('chat.message', queue: 'cassandra', jobtype: 'chat.store', retry: 3)
+    client.subscribe('chat.message', queue: 'push', jobtype: 'chat.notify', reserve_for: 60)
+
+    published = client.publish('chat.message', [{ 'room' => 'general', 'body' => 'hi' }], id: 'msg-42', custom: { 'source' => 'web' })
+
+    expect(published).to eq(Anway::Client::Published.new(event: 'msg-42', jobs: 3, duplicate: false))
+
+    copies = { 'realtime' => 'chat.broadcast', 'cassandra' => 'chat.store', 'push' => 'chat.notify' }.map do |queue, jobtype|
+      job = client.fetch(queue)
+
+      expect(job.type).to eq(jobtype)
+      expect(job.args).to eq([{ 'room' => 'general', 'body' => 'hi' }])
+      expect(job.custom).to eq('topic' => 'chat.message', 'event' => 'msg-42', 'source' => 'web')
+
+      job
+    end
+
+    expect(copies.map(&:jid).uniq.size).to eq(3)
+    expect(copies[1].retry).to eq(3)
+    expect(copies[2].reserve_for).to eq(60)
+  end
+
+  it 'T02 keeps one subscription for the same topic, queue, and job type' do
+    2.times { expect(client.subscribe('order.paid', queue: 'billing', jobtype: 'invoice')).to be(true) }
+
+    expect(client.publish('order.paid', [1]).jobs).to eq(1)
+    expect(client.unsubscribe('order.paid', queue: 'billing', jobtype: 'invoice')).to be(true)
+    expect(client.unsubscribe('order.paid', queue: 'billing', jobtype: 'invoice')).to be(true)
+    expect(client.publish('order.paid', [2]).jobs).to eq(0)
+    expect(client.queue_sizes['billing']).to eq(1)
+  end
+
+  it 'T03 makes no job for a second publish with the same event id' do
+    client.subscribe('order.paid', queue: 'billing', jobtype: 'invoice')
+
+    first = client.publish('order.paid', [1], id: 'order-1')
+    second = client.publish('order.paid', [1], id: 'order-1')
+
+    expect(first).to have_attributes(event: 'order-1', jobs: 1, duplicate: false)
+    expect(second).to have_attributes(event: 'order-1', jobs: 0, duplicate: true)
+    expect(client.queue_sizes['billing']).to eq(1)
+
+    unchecked = client.publish('order.paid', [1], id: 'order-1', unique_for: 0)
+
+    expect(unchecked).to have_attributes(jobs: 1, duplicate: false)
+  end
+
+  it 'T04 sends an event with no subscription to the dead set' do
+    published = client.publish('audit.log', [{ 'user' => 7 }])
+
+    expect(published.event).to start_with('evt-')
+    expect(published).to have_attributes(jobs: 0, duplicate: false)
+    expect(client.info.dig('faktory', 'tasks', 'Dead', 'size')).to eq(1)
+
+    client.subscribe('audit.log', queue: 'audit', jobtype: 'audit.write')
+    client.mutate('requeue', 'dead', jobtype: 'audit.log')
+
+    copy = client.fetch('audit')
+
+    expect(copy.type).to eq('audit.write')
+    expect(copy.args).to eq([{ 'user' => 7 }])
+    expect(copy.custom).to include('topic' => 'audit.log', 'event' => published.event)
+  end
+
+  it 'T04 rejects args that are not JSON types before it sends' do
+    expect { client.publish('audit.log', [{ user: 7 }]) }.to raise_error(ArgumentError)
+    expect { client.publish('audit.log', 'text') }.to raise_error(ArgumentError)
+    expect(client.info.dig('faktory', 'tasks', 'Dead', 'size')).to eq(0)
+  end
 end
 
 RSpec.describe 'worker conformance' do
@@ -444,6 +561,49 @@ RSpec.describe 'worker conformance' do
 
     wait_for(5) { current.instance_variable_get(:@processors).count(&:alive?) == 3 }
     wait_for(0.5) { view.call['concurrency'] == 3 }
+  end
+
+  it 'T05 sends its subscriptions at start and runs the copies of an event' do
+    PaidOrderJob.received = []
+
+    log = StringIO.new
+    current = runner(queues: ['billing'], logger: Logger.new(log))
+
+    run_in_thread(current)
+
+    wait_for { log.string.include?('anway started') }
+
+    expect(log.string).to include('anway subscribed topic=order.paid queue=billing jobtype=PaidOrderJob')
+
+    first = client.publish('order.paid', [{ 'id' => 1 }])
+    second = client.publish('order.paid', [{ 'id' => 2 }], id: 'order-2')
+
+    expect([first.jobs, second.jobs]).to eq([1, 1])
+
+    wait_for { PaidOrderJob.received.size == 2 }
+
+    expect(PaidOrderJob.received).to contain_exactly([{ 'id' => 1 }, first.event], [{ 'id' => 2 }, 'order-2'])
+  end
+
+  it 'T06 runs one copy of each event in each of two workers' do
+    StoreMessageJob.received = []
+    NotifyMessageJob.received = []
+
+    logs = [StringIO.new, StringIO.new]
+
+    run_in_thread(runner(queues: ['store'], subscriptions: StoreMessageJob.subscriptions, logger: Logger.new(logs[0])))
+    run_in_thread(runner(queues: ['notify'], subscriptions: NotifyMessageJob.subscriptions, logger: Logger.new(logs[1])))
+
+    wait_for { logs.all? { |log| log.string.include?('anway started') } }
+
+    messages = Array.new(3) { |index| { 'body' => "m#{index}" } }
+
+    messages.each { |message| expect(client.publish('chat.message', [message]).jobs).to eq(2) }
+
+    wait_for { processed(client) == 6 }
+
+    expect(StoreMessageJob.received).to match_array(messages)
+    expect(NotifyMessageJob.received).to match_array(messages)
   end
 
   it 'W08 stays alive after quiet and stops fetching' do

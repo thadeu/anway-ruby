@@ -122,6 +122,41 @@ To send a job that a worker in any language runs:
 Anway.push('image.resize', [42], queue: 'media')
 ```
 
+## Topics
+
+A topic sends one event to many queues. Each subscription of the topic gets one copy of the event, as a normal job in its own queue. Topics need server v0.3.0 or later.
+
+```ruby
+class BroadcastMessage
+  include Anway::Worker
+
+  subscribe 'chat.message', queue: 'realtime'
+
+  def perform(message)
+    # ...
+  end
+end
+
+Anway.publish('chat.message', [{ 'room' => 'general', 'body' => 'hi' }], id: 'msg-42')
+# => #<data Anway::Client::Published event="msg-42", jobs=3, duplicate=false>
+```
+
+- `subscribe` uses the `job_type` of the class. `queue`, `retry`, and `reserve_for` have the `job_options` of the class as defaults.
+- The worker sends `SUBSCRIBE` for each subscription when it starts, before its first fetch. Without a queue list, it also fetches the subscription queues. With a list, it logs a warning for a subscription queue that is not in the list.
+- With an `id`, a second publish of the same id within `unique_for` seconds (default one day) makes no job, and the reply has `duplicate: true`.
+- The server adds `topic` and `event` to `custom` of each copy. Use `job.custom['event']` to make the handler idempotent.
+- An event with no subscription goes to the Dead set, and the reply has `jobs: 0`.
+
+The client has the same commands:
+
+```ruby
+client.publish('chat.message', [{ 'body' => 'hi' }], id: 'msg-42', unique_for: 3600, custom: { 'source' => 'web' })
+client.subscribe('chat.message', queue: 'realtime', jobtype: 'BroadcastMessage', retry: 3, reserve_for: 60)
+client.unsubscribe('chat.message', queue: 'realtime', jobtype: 'BroadcastMessage')
+```
+
+[docs/topics.md](docs/topics.md) explains the chat example with three apps, the options, the tests, and problems.
+
 ## Rails
 
 ```ruby
@@ -160,7 +195,7 @@ config.enable_reloading = ENV["ANWAY_WORKER"].blank?
 
 | Flag | Default | Purpose |
 |---|---|---|
-| `-q`, `--queues` | Queues of the job classes, and `default` | Queues in order, as `name` or `name:weight` |
+| `-q`, `--queues` | Queues of the job classes and of their subscriptions, and `default` | Queues in order, as `name` or `name:weight` |
 | `-c`, `--concurrency` | `10` | Job threads |
 | `-t`, `--timeout` | `25` | Seconds for jobs to finish at a stop |
 | `-r`, `--require` | `config/environment.rb` | File that loads the jobs. Required outside Rails. |
@@ -229,8 +264,13 @@ WelcomeJob.perform_async('a@b.com')
 Anway::Testing.jobs.size
 Anway::Testing.drain
 
+Anway.publish('chat.message', [{ 'body' => 'hi' }])
+Anway::Testing.events.last['topic']
+
 Anway::Testing.inline!
 ```
+
+In inline mode, `Anway.publish` runs one copy in each job class of the app that subscribes to the topic.
 
 ## Client
 

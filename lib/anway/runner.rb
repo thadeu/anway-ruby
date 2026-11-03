@@ -20,10 +20,13 @@ module Anway
     # hostname uses the machine name. The server can change the thread count
     # in a BEAT reply, up to limit, such as the database pool size. autoscale,
     # as { max: n } or { min: n, max: n }, starts the worker with autoscale on.
+    # subscriptions is a list of Worker::Subscription. The default is the
+    # subscriptions of all registered job classes, read at run.
     def initialize(queues: ['default'], concurrency: 10, timeout: 25, cancel_grace: 5, labels: [],
-                   hostname: nil, tag: nil, autoscale: nil, limit: nil,
+                   hostname: nil, tag: nil, autoscale: nil, limit: nil, subscriptions: nil,
                    beat_interval: BEAT_INTERVAL, url: nil, logger: Anway.config.logger)
       @queues = Queues.new(queues)
+      @subscriptions = subscriptions
       @concurrency = concurrency
       @limit = limit
       @timeout = timeout
@@ -69,9 +72,11 @@ module Anway
     end
 
     # The first beat reports the threads, so the server can scale the worker
-    # at once.
+    # at once. The subscriptions go to the server before the first fetch.
     def run
       @client.heartbeat(nil, concurrency: @concurrency)
+
+      subscribe_all
 
       @lock.synchronize { @processors = Array.new(@concurrency) { start_processor } }
 
@@ -92,6 +97,26 @@ module Anway
 
     def signal(letter)
       @events_writer.write_nonblock(letter, exception: false)
+    end
+
+    # SUBSCRIBE is idempotent, so each start sends all subscriptions. A
+    # subscription queue that the worker does not fetch gets copies that wait.
+    def subscribe_all
+      (@subscriptions || Worker.subscriptions).each do |subscription|
+        @client.subscribe(
+          subscription.topic,
+          queue: subscription.queue,
+          jobtype: subscription.jobtype,
+          retry: subscription.retry,
+          reserve_for: subscription.reserve_for
+        )
+
+        @logger.info("anway subscribed topic=#{subscription.topic} queue=#{subscription.queue} jobtype=#{subscription.jobtype}")
+
+        next if @queues.names.include?(subscription.queue)
+
+        @logger.warn("anway does not fetch queue #{subscription.queue}, so the events of topic #{subscription.topic} wait there. Add the queue to queues.")
+      end
     end
 
     def wait_for_stop

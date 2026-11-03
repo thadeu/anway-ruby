@@ -55,6 +55,23 @@ module Anway
       job.jid
     end
 
+    # Sends one event to each subscription of the topic. Returns a
+    # Client::Published. Inside a database transaction, the publish waits for
+    # the commit and returns nil.
+    def publish(topic, args = [], **options)
+      Job.validate_args!(args)
+
+      testing = const_defined?(:Testing) ? Testing : nil
+
+      return testing.publish(topic, args, **options) if testing&.mode
+
+      published = nil
+
+      config.push_wrapper.call { published = client.publish(topic, args, **options) }
+
+      published
+    end
+
     def reset!
       @lock.synchronize do
         @client&.close
