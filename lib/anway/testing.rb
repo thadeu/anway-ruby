@@ -67,6 +67,15 @@ module Anway
         Client::Published.new(event: event_id, jobs: subscriptions.size, duplicate: false)
       end
 
+      # Publishes each event as a single publish does. No event is refused.
+      def publish_bulk(events)
+        events.map do |event|
+          published = publish(event.fetch(:topic), event.fetch(:args, []), **event.slice(:id, :unique_for, :custom))
+
+          Client::PublishResult.new(event: published.event, jobs: published.jobs, duplicate: false, error: nil)
+        end
+      end
+
       # Runs and removes all fake jobs. Jobs that they push also run.
       def drain
         Executor.call(@jobs.shift) until @jobs.empty?

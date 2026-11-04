@@ -211,6 +211,20 @@ client.subscribe('chat.message', queue: 'realtime', event: 'BroadcastMessage', r
 client.unsubscribe('chat.message', queue: 'realtime', event: 'BroadcastMessage')
 ```
 
+### Bulk publish
+
+`Anway.publish_bulk` sends many events with one `PUBLISHB` for each 1,000 events. The server saves all copies of the events of one `PUBLISHB` in one write, so an import, an outbox relay, or a replay is much faster than one `publish` for each event. Use `publish` for one event, such as in a request.
+
+```ruby
+results = Anway.publish_bulk(orders.map { |order| { topic: 'order.paid', args: [order.id], id: "order-#{order.id}" } })
+
+results.reject { |result| result.error.nil? }.each { |result| Rails.logger.warn("event #{result.event}: #{result.error}") }
+```
+
+- Each event is a hash with `topic:` and `args:`, and the options of `publish`: `id:`, `unique_for:`, and `custom:`.
+- The results are `Anway::Client::PublishResult` values (`event`, `jobs`, `duplicate`, `error`), in the order of the events. A refused event, such as a bad topic, has `error` and does not stop the others.
+- `client.publish_bulk(events)` sends one `PUBLISHB`. It takes at most 1,000 events, and more raise `ArgumentError` before the send. A bulk can make at most 10,000 jobs over all subscriptions.
+
 [docs/topics.md](docs/topics.md) explains the chat example with three apps, the options, the tests, and problems.
 
 ## Rails
@@ -327,7 +341,7 @@ Anway::Testing.events.last['topic']
 Anway::Testing.inline!
 ```
 
-In inline mode, `Anway.publish` runs one copy in each job class of the app that subscribes to the topic.
+In inline mode, `Anway.publish` runs one copy in each job class of the app that subscribes to the topic. `Anway.publish_bulk` works as one `Anway.publish` for each event.
 
 `perform_bulk` and `Anway.push_bulk` work as single pushes do: fake mode adds each job to `Anway::Testing.jobs`, and inline mode runs each job. The result is `{}`.
 

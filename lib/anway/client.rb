@@ -10,7 +10,8 @@ module Anway
     DEFAULT_PORT = 7419
     FETCH_WAIT = 2
 
-    # The most jobs that one PUSHB takes.
+    # The most jobs that one PUSHB takes, and the most events that one
+    # PUBLISHB takes.
     MAX_BULK = 1000
 
     Endpoint = Data.define(:host, :port, :password, :tls)
@@ -22,6 +23,10 @@ module Anway
     # The PUBLISH reply: the event id, the number of copies, and true when the
     # server already had an event with this id.
     Published = Data.define(:event, :jobs, :duplicate)
+
+    # One result of a PUBLISHB: as Published, and the reason in error when the
+    # server refused the event.
+    PublishResult = Data.define(:event, :jobs, :duplicate, :error)
 
     # A blank URL uses ANWAY_URL, then the local default.
     def initialize(url = nil, pool_size: 8, timeout: 10, tls: nil, wid: nil, labels: [], identity: {})
@@ -135,12 +140,31 @@ module Anway
     # publish of the same id within unique_for seconds makes no job, and the
     # reply has duplicate true. Returns a Published.
     def publish(topic, args = [], id: nil, unique_for: nil, custom: nil)
-      Job.validate_args!(args)
-
-      event = { topic: topic, args: args, id: id, unique_for: unique_for, custom: custom&.transform_keys(&:to_s) }
-      data = JSON.parse(call('PUBLISH', event.compact))
+      data = JSON.parse(call('PUBLISH', event_payload(topic, args, id: id, unique_for: unique_for, custom: custom)))
 
       Published.new(event: data['event'], jobs: data['jobs'], duplicate: data['duplicate'] == true)
+    end
+
+    # Sends up to MAX_BULK events with one PUBLISHB, and the server saves them
+    # in one write. Each event is a hash with topic: and args:, and the
+    # options of publish (id:, unique_for:, custom:). Returns one
+    # PublishResult for each event, in the same order. A refused event, such
+    # as a bad topic, has error, and does not stop the others. More than
+    # MAX_BULK events raise ArgumentError before the send.
+    def publish_bulk(events)
+      events = events.to_a
+
+      raise ArgumentError, "a bulk publish has at most #{MAX_BULK} events, not #{events.size}" if events.size > MAX_BULK
+
+      return [] if events.empty?
+
+      payload = events.map do |event|
+        event_payload(event.fetch(:topic), event.fetch(:args, []), **event.slice(:id, :unique_for, :custom))
+      end
+
+      JSON.parse(call('PUBLISHB', payload)).map do |data|
+        PublishResult.new(event: data['event'], jobs: data['jobs'], duplicate: data['duplicate'] == true, error: data['error'])
+      end
     end
 
     # Each event of the topic makes one job in queue, with event as its job
@@ -198,6 +222,13 @@ module Anway
     end
 
     private
+
+    # The argument of PUBLISH, and of each event of PUBLISHB.
+    def event_payload(topic, args, id: nil, unique_for: nil, custom: nil)
+      Job.validate_args!(args)
+
+      { topic: topic, args: args, id: id, unique_for: unique_for, custom: custom&.transform_keys(&:to_s) }.compact
+    end
 
     def queue_command(action, queues)
       call('QUEUE', "#{action} #{queues.join(' ')}")

@@ -93,6 +93,26 @@ module Anway
       published
     end
 
+    # Sends the events with one PUBLISHB for each Client::MAX_BULK events.
+    # Each event is a hash with topic: and args:, and the options of publish.
+    # Returns one Client::PublishResult for each event, in the same order.
+    # Inside a database transaction, the publish waits for the commit and
+    # returns nil.
+    def publish_bulk(events)
+      events = events.to_a
+      testing = const_defined?(:Testing) ? Testing : nil
+
+      return testing.publish_bulk(events) if testing&.mode
+
+      results = nil
+
+      config.push_wrapper.call do
+        results = events.each_slice(Client::MAX_BULK).flat_map { |slice| client.publish_bulk(slice) }
+      end
+
+      results
+    end
+
     def reset!
       @lock.synchronize do
         @client&.close

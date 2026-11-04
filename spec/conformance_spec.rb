@@ -449,6 +449,48 @@ RSpec.describe 'client conformance' do
     expect(copy.custom).to include('topic' => 'audit.log', 'event' => published.event)
   end
 
+  it 'T07 publishes events in bulk, keeps their order, and marks a repeated id as a duplicate' do
+    client.subscribe('order.paid', queue: 'billing', event: 'invoice')
+    client.subscribe('order.paid', queue: 'mailers', event: 'receipt')
+
+    results = client.publish_bulk([
+      { topic: 'order.paid', args: [1], id: 'order-1' },
+      { topic: 'order.paid', args: [2] },
+      { topic: 'order.paid', args: [3], id: 'order-1' }
+    ])
+
+    expect(results.map(&:jobs)).to eq([2, 2, 0])
+    expect(results.first).to have_attributes(event: 'order-1', duplicate: false, error: nil)
+    expect(results.last).to have_attributes(event: 'order-1', duplicate: true)
+    expect(client.queue_sizes.values_at('billing', 'mailers')).to eq([2, 2])
+
+    refused = client.publish_bulk([{ topic: 'bad topic', args: [] }, { topic: 'order.paid' }])
+
+    expect(refused.first.error).to include('invalid topic name')
+    expect(refused.last.jobs).to eq(2)
+  end
+
+  it 'T07 raises ArgumentError for more than 1,000 events, and Anway.publish_bulk splits them' do
+    events = Array.new(Anway::Client::MAX_BULK + 1) { |index| { topic: 'audit.bulk', args: [index], unique_for: 0 } }
+
+    expect { client.publish_bulk(events) }.to raise_error(ArgumentError, /at most 1000/)
+
+    client.subscribe('audit.bulk', queue: 'audit', event: 'audit.write')
+
+    previous = ENV.fetch('ANWAY_URL', nil)
+    ENV['ANWAY_URL'] = server.url
+
+    begin
+      results = Anway.publish_bulk(events)
+    ensure
+      ENV['ANWAY_URL'] = previous
+    end
+
+    expect(results.size).to eq(1001)
+    expect(results.sum(&:jobs)).to eq(1001)
+    expect(client.queue_sizes['audit']).to eq(1001)
+  end
+
   it 'T04 rejects args that are not JSON types before it sends' do
     expect { client.publish('audit.log', [{ user: 7 }]) }.to raise_error(ArgumentError)
     expect { client.publish('audit.log', 'text') }.to raise_error(ArgumentError)
@@ -515,6 +557,16 @@ RSpec.describe 'input contract conformance' do
     expect(Anway::Options.merge({ topics: %w[a b] }, { topics: %w[b c], queue: 'x' }, { queue: 'y' })).to eq(
       topics: %w[a b c], queue: 'y'
     )
+  end
+
+  it 'keeps each event of a bulk publish in fake mode, as a single publish does' do
+    Anway::Testing.fake!
+
+    results = Anway.publish_bulk([{ topic: 'fake.bulk', args: [1], id: 'f-1' }, { topic: 'fake.bulk', args: [2] }])
+
+    expect(results.map(&:event).first).to eq('f-1')
+    expect(results.map(&:error)).to eq([nil, nil])
+    expect(Anway::Testing.events.last(2).map { |event| event['args'] }).to eq([[1], [2]])
   end
 
   it 'I03 raises for a second class with the same event' do
