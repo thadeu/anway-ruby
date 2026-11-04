@@ -70,7 +70,10 @@ module Anway
       def event_job(subscription, event, event_id)
         custom = (event['custom'] || {}).merge('topic' => subscription.topic, 'event' => event_id)
 
-        Job.new(subscription.jobtype, event['args'], queue: subscription.queue, custom: custom)
+        Job.new(
+          subscription.event, event['args'],
+          queue: subscription.queue, retry: subscription.retry, reserve_for: subscription.reserve_for, custom: custom
+        )
       end
     end
   end

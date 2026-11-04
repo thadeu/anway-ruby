@@ -33,7 +33,7 @@ App A, the realtime app:
 class BroadcastMessage
   include Anway::Worker
 
-  subscribe 'chat.message', queue: 'realtime'
+  anway_options topics: %w[chat.message], queue: 'realtime'
 
   def perform(message)
     ChatChannel.broadcast_to(message['room'], message)
@@ -47,8 +47,7 @@ App B, the Cassandra app:
 class StoreMessage
   include Anway::Worker
 
-  job_options queue: 'cassandra', retry: 10
-  subscribe 'chat.message'
+  anway_options topics: %w[chat.message], queue: 'cassandra', retry: 10
 
   def perform(message)
     Messages.insert(message)
@@ -62,7 +61,7 @@ App C, the push app:
 class NotifyMessage
   include Anway::Worker
 
-  subscribe 'chat.message', queue: 'push', reserve_for: 60
+  anway_options topics: %w[chat.message], queue: 'push', reserve_for: 60
 
   def perform(message)
     PushNotification.deliver(message)
@@ -92,26 +91,29 @@ client.publish(topic, args = [], id: nil, unique_for: nil, custom: nil)
 ### In a job class
 
 ```ruby
-subscribe 'chat.message'                                       # all defaults
-subscribe 'chat.message', queue: 'realtime', retry: 3, reserve_for: 60
+anway_options topics: %w[chat.message]                                       # all defaults
+anway_options topics: %w[chat.message chat.edited], queue: 'realtime', retry: 3, reserve_for: 60
 ```
 
-- The job type of the copy is the `job_type` of the class.
-- `queue`, `retry`, and `reserve_for` have the `job_options` of the class as defaults. Without a queue, the copy goes to `default`.
-- A class can subscribe to many topics.
-- A subclass does not get the subscriptions of its parent.
+- Each topic in `topics` makes one subscription.
+- The job type of the copy is the `event` of the class. The default is the class name.
+- The copy has the `queue`, `retry`, and `reserve_for` of the class. Without a queue, the copy goes to `default`.
+- `topics` from more than one `anway_options` call add up, with no duplicates. For a single value, such as `queue`, the last call wins, so all topics of a class use the same queue. To send the events of one topic to another queue, use another class with another event.
+- A subclass does not get the `topics` or the `event` of its parent.
 - Each worker start sends `SUBSCRIBE` for the subscriptions of all job classes. `SUBSCRIBE` is idempotent. A change of `retry` or `reserve_for` applies at the next start.
+
+The README explains all keys of `anway_options` and the merge rules.
 
 ### With the client
 
 ```ruby
-client.subscribe('chat.message', queue: 'realtime', jobtype: 'BroadcastMessage', retry: 3, reserve_for: 60)
-client.unsubscribe('chat.message', queue: 'realtime', jobtype: 'BroadcastMessage')
+client.subscribe('chat.message', queue: 'realtime', event: 'BroadcastMessage', retry: 3, reserve_for: 60)
+client.unsubscribe('chat.message', queue: 'realtime', event: 'BroadcastMessage')
 ```
 
 Both return `true`. A missing subscription is not an error for `unsubscribe`.
 
-The worker does not send `UNSUBSCRIBE`. The server keeps a subscription on disk, so copies go to the queue while the app is down. When you remove `subscribe` from a class, remove the subscription with `client.unsubscribe`, or its copies wait in the queue.
+The worker does not send `UNSUBSCRIBE`. The server keeps a subscription on disk, so copies go to the queue while the app is down. When you remove a topic from `topics`, remove the subscription with `client.unsubscribe`, or its copies wait in the queue.
 
 ## Queues of the worker
 
@@ -176,6 +178,6 @@ Anway.publish('chat.message', [{ 'body' => 'hi' }])  # runs each subscribed clas
 |---|---|
 | `publish` returns `jobs: 0` | The topic has no subscription. Start the subscriber worker one time, so that it sends `SUBSCRIBE`. The event is in the Dead set. Requeue it after the subscription exists. |
 | Copies wait in a queue and do not run | The worker does not fetch that queue. Look for the `does not fetch queue` warning, and add the queue to `queues`. |
-| Copies still go to a queue after you removed `subscribe` | The server keeps the subscription. Call `client.unsubscribe`. |
+| Copies still go to a queue after you removed a topic from `topics` | The server keeps the subscription. Call `client.unsubscribe`. |
 | `Anway::ServerError` at worker start | The server is older than v0.3.0 and does not know `SUBSCRIBE`. Update the server. |
 | A handler runs the same event two times | Delivery is at least once. Make the handler idempotent with `job.custom['event']`. |

@@ -205,7 +205,7 @@ module Anway
     def queues
       return @options[:queues] if @options[:queues]
 
-      names = Worker.classes.map { |klass| klass.job_options[:queue]&.to_s }
+      names = Worker.classes.map { |klass| klass.anway_options[:queue]&.to_s }
       names.concat(Worker.subscriptions.map(&:queue))
       names.concat(active_job_queues)
 

@@ -3,8 +3,7 @@
 class NamedJob
   include Anway::Worker
 
-  job_type 'email.send'
-  job_options queue: 'mailers', retry: 5, custom: { unique_for: 60 }
+  anway_options event: 'email.send', queue: 'mailers', retry: 5, custom: { unique_for: 60 }
 
   class << self
     attr_accessor :received
@@ -16,19 +15,14 @@ class NamedJob
 end
 
 class ChildJob < NamedJob
-  job_type 'child.job'
-  job_options retry: 1
+  anway_options event: 'child.job', retry: 1
 end
 
 class RoomMessageJob
   include Anway::Worker
 
-  job_type 'chat.broadcast'
-  job_options queue: 'realtime', retry: 2, reserve_for: 120
-
-  subscribe 'chat.message'
-  subscribe 'chat.edited', queue: 'edits', retry: 0
-  subscribe 'chat.message'
+  anway_options event: 'chat.broadcast', queue: 'realtime', retry: 2, reserve_for: 120
+  anway_options topics: %w[chat.message chat.edited chat.message]
 
   class << self
     attr_accessor :received
@@ -40,13 +34,12 @@ class RoomMessageJob
 end
 
 class LateMessageJob < RoomMessageJob
-  job_type 'chat.late'
 end
 
 class PlainSubscriberJob
   include Anway::Worker
 
-  subscribe 'chat.message'
+  anway_options topics: 'chat.message'
 
   def perform(_message); end
 end
@@ -62,19 +55,31 @@ RSpec.describe Anway::Worker do
     expect(job.type).to eq('email.send')
     expect(job.queue).to eq('mailers')
     expect(job.retry).to eq(5)
+    expect(job.backtrace).to eq(30)
     expect(job.args).to eq(['a@b.com'])
     expect(job.custom).to eq('unique_for' => 60)
   end
 
-  it 'finds the class by job type only when it is registered' do
+  it 'finds the class by event only when it is registered' do
     expect(described_class.find('email.send')).to eq(NamedJob)
     expect(described_class.find('child.job')).to eq(ChildJob)
+    expect(described_class.find('LateMessageJob')).to eq(LateMessageJob)
     expect { described_class.find('NamedJob') }.to raise_error(Anway::UnknownJob)
     expect { described_class.find('Kernel') }.to raise_error(Anway::UnknownJob)
   end
 
-  it 'inherits options' do
-    expect(ChildJob.job_options).to include(queue: 'mailers', retry: 1)
+  it 'uses the class name as the default event' do
+    expect(PlainSubscriberJob.anway_options[:event]).to eq('PlainSubscriberJob')
+  end
+
+  it 'inherits all options except event and topics' do
+    expect(ChildJob.anway_options).to eq(
+      event: 'child.job', topics: [], queue: 'mailers', retry: 1, custom: { 'unique_for' => 60 }
+    )
+
+    expect(LateMessageJob.anway_options).to eq(
+      event: 'LateMessageJob', topics: [], queue: 'realtime', retry: 2, reserve_for: 120
+    )
   end
 
   it 'schedules jobs' do
@@ -84,9 +89,13 @@ RSpec.describe Anway::Worker do
   end
 
   it 'changes options for one push' do
-    NamedJob.set(queue: 'low').perform_async('x')
+    NamedJob.set(queue: 'low', track: true).perform_async('x')
 
-    expect(Anway::Testing.jobs.last.queue).to eq('low')
+    job = Anway::Testing.jobs.last
+
+    expect(job.queue).to eq('low')
+    expect(job.retry).to eq(5)
+    expect(job.custom).to eq('unique_for' => 60, 'track' => 1)
   end
 
   it 'rejects args that are not JSON types' do
@@ -95,32 +104,58 @@ RSpec.describe Anway::Worker do
     expect { NamedJob.perform_async(key: 1) }.to raise_error(ArgumentError)
   end
 
-  it 'pushes a job with no local class' do
-    Anway.push('image.resize', [42], queue: 'media')
+  it 'rejects an unknown key' do
+    expect { Class.new { include Anway::Worker }.anway_options(queues: 'a') }.to raise_error(ArgumentError, /queues/)
+    expect { Class.new { include Anway::Worker }.anway_options(at: Time.now) }.to raise_error(ArgumentError, /at/)
+    expect { NamedJob.set(jobtype: 'x') }.to raise_error(ArgumentError, /jobtype/)
+    expect { NamedJob.set(topics: %w[x]) }.to raise_error(ArgumentError, /topics/)
+    expect { NamedJob.set(event: 'x') }.to raise_error(ArgumentError, /event/)
+    expect { Anway::Job.new('x', [], type: 'y') }.to raise_error(ArgumentError, /type/)
+    expect { Anway::Job.new('x', [], on_dead: { jobtype: 'y' }) }.to raise_error(ArgumentError, /jobtype/)
+    expect { Class.new { include Anway::Worker }.anway_options(on_dead: { queue: 'y' }) }.to raise_error(ArgumentError, /event/)
+    expect { Anway.push('x', [], wait: 1) }.to raise_error(ArgumentError, /wait/)
+  end
 
-    expect(Anway::Testing.jobs.last.to_h).to include('jobtype' => 'image.resize', 'queue' => 'media')
+  it 'pushes a job with no local class' do
+    Anway.push('image.resize', [42], queue: 'media', expires_in: 300)
+
+    expect(Anway::Testing.jobs.last.to_h).to include(
+      'jobtype' => 'image.resize', 'queue' => 'media', 'custom' => { 'expires_in' => 300 }
+    )
   end
 end
 
-RSpec.describe 'Anway::Worker subscribe' do
+RSpec.describe Anway::Options do
+  it 'lets a contract key win over a custom key with the same name' do
+    wire = described_class.wire(unique_for: 60, custom: { 'unique_for' => 5, :tenant => 'a' })
+
+    expect(wire).to eq('custom' => { 'unique_for' => 60, 'tenant' => 'a' })
+  end
+
+  it 'sends no field for a nil value' do
+    expect(described_class.wire(queue: nil, track: false, custom: {})).to eq({})
+  end
+end
+
+RSpec.describe 'Anway::Worker topics' do
   subscription = Anway::Worker::Subscription
 
-  it 'takes the job type and job options of the class as defaults' do
+  it 'makes one subscription for each topic, with the options of the class' do
     expect(RoomMessageJob.subscriptions).to eq(
       [
-        subscription.new(topic: 'chat.message', queue: 'realtime', jobtype: 'chat.broadcast', retry: 2, reserve_for: 120),
-        subscription.new(topic: 'chat.edited', queue: 'edits', jobtype: 'chat.broadcast', retry: 0, reserve_for: 120)
+        subscription.new(topic: 'chat.message', queue: 'realtime', event: 'chat.broadcast', retry: 2, reserve_for: 120),
+        subscription.new(topic: 'chat.edited', queue: 'realtime', event: 'chat.broadcast', retry: 2, reserve_for: 120)
       ]
     )
   end
 
   it 'uses the default queue without a class queue' do
     expect(PlainSubscriberJob.subscriptions).to eq(
-      [subscription.new(topic: 'chat.message', queue: 'default', jobtype: 'PlainSubscriberJob', retry: nil, reserve_for: nil)]
+      [subscription.new(topic: 'chat.message', queue: 'default', event: 'PlainSubscriberJob', retry: nil, reserve_for: nil)]
     )
   end
 
-  it 'does not give the subscriptions of a parent to a subclass' do
+  it 'does not give the topics of a parent to a subclass' do
     expect(LateMessageJob.subscriptions).to be_empty
   end
 
@@ -128,8 +163,12 @@ RSpec.describe 'Anway::Worker subscribe' do
     expect(Anway::Worker.subscriptions).to include(*RoomMessageJob.subscriptions, *PlainSubscriberJob.subscriptions)
   end
 
-  it 'rejects an unknown option' do
-    expect { Class.new { include Anway::Worker }.subscribe('x', queues: 'a') }.to raise_error(ArgumentError, /queues/)
+  it 'does not send topics in a push' do
+    Anway::Testing.fake!
+
+    RoomMessageJob.perform_async('x')
+
+    expect(Anway::Testing.jobs.last.to_h.keys).not_to include('topics')
   end
 end
 
@@ -178,7 +217,7 @@ RSpec.describe 'Anway.publish' do
 
     client = open_client(server.url)
 
-    client.subscribe('chat.message', queue: 'realtime', jobtype: 'chat.broadcast')
+    client.subscribe('chat.message', queue: 'realtime', event: 'chat.broadcast')
 
     expect(Anway.publish('chat.message', ['hi'], id: 'm1')).to eq(Anway::Client::Published.new(event: 'm1', jobs: 1, duplicate: false))
     expect(client.queue_sizes['realtime']).to eq(1)

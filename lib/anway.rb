@@ -3,6 +3,7 @@
 require_relative 'anway/version'
 require_relative 'anway/errors'
 require_relative 'anway/configuration'
+require_relative 'anway/options'
 require_relative 'anway/job'
 require_relative 'anway/connection'
 require_relative 'anway/pool'
@@ -39,9 +40,10 @@ module Anway
       end
     end
 
-    # Sends a job with no local class, for a worker in any language.
-    def push(type, args = [], **options)
-      enqueue(Job.new(type, args, **options))
+    # Sends a job with no local class, for a worker in any language. The
+    # options are the push keys of the input contract.
+    def push(event, args = [], **options)
+      enqueue(Job.new(event, args, **options))
     end
 
     # Inside a database transaction, the push waits for the commit.

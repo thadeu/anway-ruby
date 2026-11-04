@@ -3,6 +3,7 @@
 require 'json'
 require 'securerandom'
 require 'time'
+require_relative 'options'
 
 module Anway
   class Job
@@ -48,24 +49,30 @@ module Anway
       job
     end
 
-    # Options: queue, retry, reserve_for, backtrace, at, custom, jid.
-    def initialize(type, args = [], **options)
+    # The event goes on the wire as jobtype. The options are the push keys of
+    # the input contract (Anway::Options::PUSH). An unknown key raises
+    # ArgumentError. jid is optional, and the default is a new random id.
+    def initialize(event, args = [], jid: nil, **options)
       self.class.validate_json!(args)
 
-      @jid = options[:jid] || SecureRandom.hex(12)
-      @type = type
-      @args = args
-      @queue = options[:queue]&.to_s
-      @retry = options[:retry]
-      @reserve_for = options[:reserve_for]
-      @backtrace = options[:backtrace]
-      @custom = options[:custom]&.transform_keys(&:to_s)
+      Options.check!(options, Options::PUSH)
 
-      run_at(options[:at]) if options[:at]
+      fields = Options.wire(options)
+
+      @jid = jid || SecureRandom.hex(12)
+      @type = event
+      @args = args
+
+      @queue = fields['queue']
+      @retry = fields['retry']
+      @reserve_for = fields['reserve_for']
+      @backtrace = fields['backtrace']
+      @at = fields['at']
+      @custom = fields['custom']
     end
 
     def run_at(time)
-      @at = time.to_time.utc.iso8601(9)
+      @at = Options.time(time)
 
       self
     end

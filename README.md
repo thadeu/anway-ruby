@@ -98,28 +98,61 @@ console:
 class WelcomeJob
   include Anway::Worker
 
-  job_type 'email.send'
-  job_options queue: 'mailers', retry: 5
+  anway_options event: 'email.welcome', retry: 5
+  anway_options topics: %w[user.created], queue: 'mailers'
 
-  def perform(address)
+  def perform(user_id)
     # ...
   end
 end
 
-WelcomeJob.perform_async('a@b.com')
-WelcomeJob.perform_in(300, 'a@b.com')
-WelcomeJob.set(queue: 'low').perform_async('a@b.com')
+WelcomeJob.perform_async(1)
+WelcomeJob.perform_in(300, 1)
+WelcomeJob.set(queue: 'low', unique_for: 60).perform_async(1)
 ```
 
-- `job_type` is optional. The default is the class name. Use a name when a worker in another language runs the job.
-- `job_options` accepts `queue`, `retry`, `reserve_for`, `backtrace`, and `custom`, such as `custom: { unique_for: 600 }`.
+- `anway_options` declares the options of the class. You can call it more than once. An unknown key raises `ArgumentError`.
+- `event` is the name of what the job handles. It goes to the server as the job type. The default is the class name. Use a name when a worker in another language runs the job.
+- Two classes with the same event raise `ArgumentError`. A worker has one class for each event.
+- A subclass inherits all options except `event` and `topics`.
+- `set` changes the options for one push. It takes the push keys below.
 - Args must be JSON types with string hash keys. Symbols, times, and objects raise `ArgumentError`.
 - Delivery is at least once, so jobs must be idempotent.
 
-To send a job that a worker in any language runs:
+### Options
+
+All Anway clients use the same keys. The gem translates them to the fields of the protocol.
+
+| Key | Sent as | Note |
+|---|---|---|
+| `event` | `jobtype` | The default is the class name. Only in `anway_options`. |
+| `queue` | `queue` | The default is `default`. |
+| `retry` | `retry` | The server default is 25. `0` discards the job at the first failure. `-1` sends it to the Dead set at once. |
+| `reserve_for` | `reserve_for` | Seconds. |
+| `backtrace` | `backtrace` | Lines. The default for a class is 30. |
+| `at` | `at` | A time to run later. Only for a push. |
+| `unique_for` | `custom.unique_for` | Seconds. |
+| `unique_until` | `custom.unique_until` | `success` or `start`. |
+| `expires_in` | `custom.expires_in` | Seconds. |
+| `expires_at` | `custom.expires_at` | A time. The gem sends it as RFC 3339. |
+| `track` | `custom.track` | `true` sends `1`. |
+| `on_dead` | `custom.on_dead` | `{ event:, queue: }`. When the job dies, the server pushes a job of this event. |
+| `custom` | `custom` | The keys of your app. A key above wins over a key with the same name here. |
+| `topics` | One `SUBSCRIBE` for each topic | Only in `anway_options`. See [Topics](#topics). |
+
+When a class has more than one option set, the sets merge in call order:
+
+- A single value, such as `queue` or `retry`: the last set that has it wins.
+- `topics`: the topics of all sets add up, in order, with no duplicates.
+- `custom`: the hashes merge, and a later key wins.
+
+`set` merges with the options of the class by the same rules. `WelcomeJob.anway_options`, with no keys, returns the merged options.
+
+To send a job that a worker in any language runs, give the event and the same push keys:
 
 ```ruby
-Anway.push('image.resize', [42], queue: 'media')
+Anway.push('image.resize', [42], queue: 'media', expires_in: 600)
+Anway::Job.new('email.welcome', [1], unique_for: 60, queue: 'low')
 ```
 
 ## Topics
@@ -130,7 +163,7 @@ A topic sends one event to many queues. Each subscription of the topic gets one 
 class BroadcastMessage
   include Anway::Worker
 
-  subscribe 'chat.message', queue: 'realtime'
+  anway_options topics: %w[chat.message], queue: 'realtime'
 
   def perform(message)
     # ...
@@ -141,7 +174,7 @@ Anway.publish('chat.message', [{ 'room' => 'general', 'body' => 'hi' }], id: 'ms
 # => #<data Anway::Client::Published event="msg-42", jobs=3, duplicate=false>
 ```
 
-- `subscribe` uses the `job_type` of the class. `queue`, `retry`, and `reserve_for` have the `job_options` of the class as defaults.
+- Each topic in `topics` makes one subscription. The copies have the `event` of the class as their job type, and the `queue`, `retry`, and `reserve_for` of the class.
 - The worker sends `SUBSCRIBE` for each subscription when it starts, before its first fetch. Without a queue list, it also fetches the subscription queues. With a list, it logs a warning for a subscription queue that is not in the list.
 - With an `id`, a second publish of the same id within `unique_for` seconds (default one day) makes no job, and the reply has `duplicate: true`.
 - The server adds `topic` and `event` to `custom` of each copy. Use `job.custom['event']` to make the handler idempotent.
@@ -151,8 +184,8 @@ The client has the same commands:
 
 ```ruby
 client.publish('chat.message', [{ 'body' => 'hi' }], id: 'msg-42', unique_for: 3600, custom: { 'source' => 'web' })
-client.subscribe('chat.message', queue: 'realtime', jobtype: 'BroadcastMessage', retry: 3, reserve_for: 60)
-client.unsubscribe('chat.message', queue: 'realtime', jobtype: 'BroadcastMessage')
+client.subscribe('chat.message', queue: 'realtime', event: 'BroadcastMessage', retry: 3, reserve_for: 60)
+client.unsubscribe('chat.message', queue: 'realtime', event: 'BroadcastMessage')
 ```
 
 [docs/topics.md](docs/topics.md) explains the chat example with three apps, the options, the tests, and problems.
@@ -260,7 +293,7 @@ Keep the database pool at the concurrency value or more. A job queue with no wor
 require 'anway/testing'
 
 Anway::Testing.fake!
-WelcomeJob.perform_async('a@b.com')
+WelcomeJob.perform_async(1)
 Anway::Testing.jobs.size
 Anway::Testing.drain
 
@@ -278,7 +311,7 @@ In inline mode, `Anway.publish` runs one copy in each job class of the app that 
 
 ```ruby
 client = Anway::Client.new('tcp://localhost:7419')
-client.push(Anway::Job.new('email.send', ['a@b.com']))
+client.push(Anway::Job.new('email.welcome', [1]))
 ```
 
 The error kinds are `Anway::NotUnique`, `Anway::Closed`, `Anway::ServerError`, and `Anway::ConnectionError`. A failed call does not resend.

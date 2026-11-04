@@ -106,8 +106,8 @@ module Anway
 
     # The command is "kill", "discard", "requeue", or "clear".
     # The target is "retries", "scheduled", or "dead".
-    def mutate(command, target, jobtype: nil, jids: nil, regexp: nil)
-      filter = { jobtype: jobtype, jids: jids, regexp: regexp }.compact
+    def mutate(command, target, event: nil, jids: nil, regexp: nil)
+      filter = { jobtype: event, jids: jids, regexp: regexp }.compact
 
       call('MUTATE', { cmd: command, target: target, filter: filter })
 
@@ -126,19 +126,20 @@ module Anway
       Published.new(event: data['event'], jobs: data['jobs'], duplicate: data['duplicate'] == true)
     end
 
-    # Each event of the topic makes one job of jobtype in queue. A second call
-    # with the same topic, queue, and jobtype sets new retry and reserve_for.
-    def subscribe(topic, queue:, jobtype:, retry: nil, reserve_for: nil)
+    # Each event of the topic makes one job in queue, with event as its job
+    # type. A second call with the same topic, queue, and event sets new retry
+    # and reserve_for.
+    def subscribe(topic, queue:, event:, retry: nil, reserve_for: nil)
       options = { retry: binding.local_variable_get(:retry), reserve_for: reserve_for }
 
-      call('SUBSCRIBE', { topic: topic, queue: queue, jobtype: jobtype, **options }.compact)
+      call('SUBSCRIBE', { topic: topic, queue: queue, jobtype: event, **options }.compact)
 
       true
     end
 
     # A missing subscription is not an error.
-    def unsubscribe(topic, queue:, jobtype:)
-      call('UNSUBSCRIBE', { topic: topic, queue: queue, jobtype: jobtype })
+    def unsubscribe(topic, queue:, event:)
+      call('UNSUBSCRIBE', { topic: topic, queue: queue, jobtype: event })
 
       true
     end

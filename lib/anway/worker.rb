@@ -6,29 +6,27 @@ module Anway
   #   class WelcomeJob
   #     include Anway::Worker
   #
-  #     job_options queue: 'mailers', retry: 5
+  #     anway_options event: 'email.welcome', retry: 5
+  #     anway_options topics: %w[user.created], queue: 'mailers'
   #
   #     def perform(user_id); end
   #   end
   #
   #   WelcomeJob.perform_async(42)
+  #   WelcomeJob.set(queue: 'low', unique_for: 60).perform_async(42)
   #
-  # A class can also run the events of a topic:
-  #
-  #   class BroadcastMessage
-  #     include Anway::Worker
-  #
-  #     subscribe 'chat.message', queue: 'realtime'
-  #
-  #     def perform(message); end
-  #   end
+  # The keys are the input contract (Anway::Options). The event is the job
+  # type on the wire, and the default is the class name. Each topic makes one
+  # subscription, which the worker sends when it starts.
   module Worker
     DEFAULT_BACKTRACE = 30
-    SUBSCRIBE_OPTIONS = %i[retry reserve_for].freeze
 
-    # One topic, queue, and job type. retry and reserve_for are the options of
+    # One topic, queue, and event. retry and reserve_for are the options of
     # each copy.
-    Subscription = Data.define(:topic, :queue, :jobtype, :retry, :reserve_for)
+    Subscription = Data.define(:topic, :queue, :event, :retry, :reserve_for)
+
+    # A subclass does not inherit these keys.
+    OWN_KEYS = %i[event topics].freeze
 
     @registry = {}
     @lock = Mutex.new
@@ -40,10 +38,21 @@ module Anway
         register(base) if base.name
       end
 
-      def register(klass, old_type: nil)
+      # Each event has one class. A class with the same name replaces the old
+      # one, as after a code reload. Another class with the same event raises
+      # ArgumentError.
+      def register(klass, old_event: nil)
+        event = klass.anway_options[:event]
+
         @lock.synchronize do
-          @registry.delete(old_type) if old_type
-          @registry[klass.job_type] = klass
+          current = @registry[event]
+
+          if current && !current.equal?(klass) && current.name != klass.name
+            raise ArgumentError, "event #{event.inspect} already has the class #{current.name}, so #{klass.name} cannot use it"
+          end
+
+          @registry.delete(old_event) if old_event && @registry[old_event].equal?(klass)
+          @registry[event] = klass
         end
       end
 
@@ -57,13 +66,13 @@ module Anway
         classes.flat_map(&:subscriptions).uniq
       end
 
-      # Only registered classes run. The job type comes from the network, so it
+      # Only registered classes run. The event comes from the network, so it
       # never becomes a constant lookup. The lookup by the class name below
       # uses a registered name, and returns the newest class after a reload.
-      def find(type)
-        klass = @lock.synchronize { @registry[type] }
+      def find(event)
+        klass = @lock.synchronize { @registry[event] }
 
-        raise UnknownJob, "no handler for job type #{type.inspect}" unless klass
+        raise UnknownJob, "no handler for event #{event.inspect}" unless klass
 
         klass.name ? Object.const_get(klass.name) : klass
       end
@@ -87,48 +96,44 @@ module Anway
         Worker.register(subclass) if subclass.name
       end
 
-      def job_type(name = nil)
-        return @job_type || self.name unless name
+      # With keys, adds one option set to the class. The keys are
+      # Anway::Options::DECLARATION, and an unknown key raises ArgumentError.
+      #
+      # Without keys, returns the options of the class: the options of the
+      # parent class without event and topics, then each set in call order.
+      # event and topics are always in the result.
+      def anway_options(**options)
+        return declared_options if options.empty?
 
-        old_type = job_type
-        @job_type = name
+        Options.check!(options, Options::DECLARATION)
 
-        Worker.register(self, old_type: old_type)
+        # Translates the set now, so that a bad value, such as an on_dead
+        # without an event, fails when the class loads.
+        Options.wire(options.except(*OWN_KEYS))
+
+        options = options.merge(event: event_name(options[:event])) if options.key?(:event)
+        old_event = declared_options[:event]
+
+        (@anway_option_sets ||= []) << options.freeze
+
+        register_event(old_event) if options.key?(:event)
+
+        declared_options
       end
 
-      def job_options(options = nil)
-        inherited_options = superclass.respond_to?(:job_options) ? superclass.job_options : {}
-
-        @job_options = (@job_options || {}).merge(options) if options
-
-        inherited_options.merge(@job_options || {})
-      end
-
-      # Runs each event of the topic in this class. The job type is the job
-      # type of the class. queue, retry, and reserve_for have the job_options
-      # of the class as defaults, read when the worker starts. A subclass does
-      # not get the subscriptions of its parent.
-      def subscribe(topic, queue: nil, **options)
-        unknown = options.keys - SUBSCRIBE_OPTIONS
-
-        raise ArgumentError, "unknown subscribe options: #{unknown.join(', ')}" if unknown.any?
-
-        entry = { topic: topic.to_s, queue: queue&.to_s, **options }
-
-        @subscriptions ||= []
-        @subscriptions << entry unless @subscriptions.include?(entry)
-      end
-
+      # One subscription for each topic, with the event, queue, retry, and
+      # reserve_for of the class. Without a queue, the copies go to default.
       def subscriptions
-        defaults = job_options
+        options = declared_options
+        queue = (options[:queue] || 'default').to_s
 
-        (@subscriptions || []).map do |entry|
+        options[:topics].map do |topic|
           Subscription.new(
-            topic: entry[:topic],
-            queue: entry[:queue] || defaults[:queue]&.to_s || 'default',
-            jobtype: job_type,
-            retry: entry.fetch(:retry, defaults[:retry]),
-            reserve_for: entry.fetch(:reserve_for, defaults[:reserve_for])
+            topic: topic,
+            queue: queue,
+            event: options[:event],
+            retry: options[:retry],
+            reserve_for: options[:reserve_for]
           )
         end
       end
@@ -145,13 +150,48 @@ module Anway
         enqueue_with(args, { at: Time.now + seconds.to_f })
       end
 
-      # Changes the options for one push: WelcomeJob.set(queue: 'low').perform_async(1)
+      # Changes the options for one push, with the push keys of
+      # Anway::Options::PUSH: WelcomeJob.set(queue: 'low').perform_async(1)
       def set(**options)
+        Options.check!(options, Options::PUSH)
+
         Setter.new(self, options)
       end
 
+      # The options of the class, then the options of the push, merge with
+      # the same rules as two anway_options calls.
       def enqueue_with(args, options)
-        Anway.enqueue(Job.new(job_type, args, backtrace: DEFAULT_BACKTRACE, **job_options, **options))
+        declared = declared_options
+        push = Options.merge({ backtrace: DEFAULT_BACKTRACE }, declared.except(*OWN_KEYS), options)
+
+        Anway.enqueue(Job.new(declared[:event], args, **push))
+      end
+
+      private
+
+      def declared_options
+        parent = superclass.respond_to?(:anway_options) ? superclass.anway_options.except(*OWN_KEYS) : {}
+
+        Options.merge({ event: name, topics: [] }, parent, *@anway_option_sets).freeze
+      end
+
+      # A set with an event that another class has does not stay.
+      def register_event(old_event)
+        return unless name
+
+        Worker.register(self, old_event: old_event)
+      rescue ArgumentError
+        @anway_option_sets.pop
+
+        raise
+      end
+
+      def event_name(value)
+        event = value.to_s
+
+        raise ArgumentError, 'event must not be empty' if event.empty?
+
+        event
       end
     end
 

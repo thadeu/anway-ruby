@@ -92,7 +92,7 @@ end
 class PaidOrderJob
   include Anway::Worker
 
-  subscribe 'order.paid', queue: 'billing'
+  anway_options topics: %w[order.paid], queue: 'billing'
 
   class << self
     attr_accessor :received
@@ -106,8 +106,7 @@ end
 class StoreMessageJob
   include Anway::Worker
 
-  job_options queue: 'store'
-  subscribe 'chat.message'
+  anway_options queue: 'store', topics: %w[chat.message]
 
   class << self
     attr_accessor :received
@@ -121,8 +120,7 @@ end
 class NotifyMessageJob
   include Anway::Worker
 
-  job_options queue: 'notify'
-  subscribe 'chat.message'
+  anway_options queue: 'notify', topics: %w[chat.message]
 
   class << self
     attr_accessor :received
@@ -130,6 +128,38 @@ class NotifyMessageJob
 
   def perform(message)
     self.class.received << message
+  end
+end
+
+class I01WelcomeJob
+  include Anway::Worker
+
+  anway_options event: 'i01.welcome'
+
+  def perform(_user_id); end
+end
+
+class I02MergedJob
+  include Anway::Worker
+
+  anway_options event: 'i02.first', queue: 'a', retry: 1, topics: %w[i02.one i02.two], custom: { 'source' => 'app', 'tenant' => 'a' }
+  anway_options event: 'i02.merged', queue: 'b', reserve_for: 60, topics: %w[i02.two i02.three], custom: { 'tenant' => 'b' }
+
+  def perform; end
+end
+
+class I04AuditJob
+  include Anway::Worker
+
+  anway_options event: 'i04.audit', retry: 3, reserve_for: 90
+  anway_options topics: %w[i04.created i04.deleted], queue: 'i04'
+
+  class << self
+    attr_accessor :received
+  end
+
+  def perform(record)
+    self.class.received << [record, job.type, job.custom['topic'], job.retry, job.reserve_for]
   end
 end
 
@@ -227,7 +257,7 @@ RSpec.describe 'client conformance' do
   end
 
   it 'C07 raises NotUnique for a second unique push' do
-    job = -> { Anway::Job.new('x', [1], custom: { unique_for: 60 }) }
+    job = -> { Anway::Job.new('x', [1], unique_for: 60) }
 
     client.push(job.call)
 
@@ -260,7 +290,7 @@ RSpec.describe 'client conformance' do
       client.fail(jid, errtype: 'Boom', message: 'failed')
     end
 
-    client.mutate('requeue', 'retries', jobtype: 'a')
+    client.mutate('requeue', 'retries', event: 'a')
 
     expect(retries(client)).to eq(1)
     expect(client.fetch('default').type).to eq('a')
@@ -285,7 +315,7 @@ RSpec.describe 'client conformance' do
   end
 
   it 'C12 sets and gets job progress' do
-    jid = client.push(Anway::Job.new('x', custom: { track: 1 }))
+    jid = client.push(Anway::Job.new('x', track: true))
 
     client.track_set(jid, percent: 40, desc: 'step')
 
@@ -328,18 +358,18 @@ RSpec.describe 'client conformance' do
   end
 
   it 'T01 publishes one copy to each subscription' do
-    client.subscribe('chat.message', queue: 'realtime', jobtype: 'chat.broadcast')
-    client.subscribe('chat.message', queue: 'cassandra', jobtype: 'chat.store', retry: 3)
-    client.subscribe('chat.message', queue: 'push', jobtype: 'chat.notify', reserve_for: 60)
+    client.subscribe('chat.message', queue: 'realtime', event: 'chat.broadcast')
+    client.subscribe('chat.message', queue: 'cassandra', event: 'chat.store', retry: 3)
+    client.subscribe('chat.message', queue: 'push', event: 'chat.notify', reserve_for: 60)
 
     published = client.publish('chat.message', [{ 'room' => 'general', 'body' => 'hi' }], id: 'msg-42', custom: { 'source' => 'web' })
 
     expect(published).to eq(Anway::Client::Published.new(event: 'msg-42', jobs: 3, duplicate: false))
 
-    copies = { 'realtime' => 'chat.broadcast', 'cassandra' => 'chat.store', 'push' => 'chat.notify' }.map do |queue, jobtype|
+    copies = { 'realtime' => 'chat.broadcast', 'cassandra' => 'chat.store', 'push' => 'chat.notify' }.map do |queue, event|
       job = client.fetch(queue)
 
-      expect(job.type).to eq(jobtype)
+      expect(job.type).to eq(event)
       expect(job.args).to eq([{ 'room' => 'general', 'body' => 'hi' }])
       expect(job.custom).to eq('topic' => 'chat.message', 'event' => 'msg-42', 'source' => 'web')
 
@@ -352,17 +382,17 @@ RSpec.describe 'client conformance' do
   end
 
   it 'T02 keeps one subscription for the same topic, queue, and job type' do
-    2.times { expect(client.subscribe('order.paid', queue: 'billing', jobtype: 'invoice')).to be(true) }
+    2.times { expect(client.subscribe('order.paid', queue: 'billing', event: 'invoice')).to be(true) }
 
     expect(client.publish('order.paid', [1]).jobs).to eq(1)
-    expect(client.unsubscribe('order.paid', queue: 'billing', jobtype: 'invoice')).to be(true)
-    expect(client.unsubscribe('order.paid', queue: 'billing', jobtype: 'invoice')).to be(true)
+    expect(client.unsubscribe('order.paid', queue: 'billing', event: 'invoice')).to be(true)
+    expect(client.unsubscribe('order.paid', queue: 'billing', event: 'invoice')).to be(true)
     expect(client.publish('order.paid', [2]).jobs).to eq(0)
     expect(client.queue_sizes['billing']).to eq(1)
   end
 
   it 'T03 makes no job for a second publish with the same event id' do
-    client.subscribe('order.paid', queue: 'billing', jobtype: 'invoice')
+    client.subscribe('order.paid', queue: 'billing', event: 'invoice')
 
     first = client.publish('order.paid', [1], id: 'order-1')
     second = client.publish('order.paid', [1], id: 'order-1')
@@ -383,8 +413,8 @@ RSpec.describe 'client conformance' do
     expect(published).to have_attributes(jobs: 0, duplicate: false)
     expect(client.info.dig('faktory', 'tasks', 'Dead', 'size')).to eq(1)
 
-    client.subscribe('audit.log', queue: 'audit', jobtype: 'audit.write')
-    client.mutate('requeue', 'dead', jobtype: 'audit.log')
+    client.subscribe('audit.log', queue: 'audit', event: 'audit.write')
+    client.mutate('requeue', 'dead', event: 'audit.log')
 
     copy = client.fetch('audit')
 
@@ -397,6 +427,115 @@ RSpec.describe 'client conformance' do
     expect { client.publish('audit.log', [{ user: 7 }]) }.to raise_error(ArgumentError)
     expect { client.publish('audit.log', 'text') }.to raise_error(ArgumentError)
     expect(client.info.dig('faktory', 'tasks', 'Dead', 'size')).to eq(0)
+  end
+end
+
+RSpec.describe 'input contract conformance' do
+  let(:server) { start_server }
+  let(:client) { open_client(server.url) }
+
+  it 'I01 sends the contract keys in custom, and the event as jobtype' do
+    options = {
+      queue: 'low', unique_for: 60, unique_until: :start, expires_in: 300, expires_at: Time.utc(2099, 1, 2, 3, 4, 5),
+      track: true, on_dead: { event: 'mail.bounced', queue: 'dead_letters' },
+      custom: { 'unique_for' => 1, :tenant => 'acme' }
+    }
+
+    custom = {
+      'tenant' => 'acme', 'unique_for' => 60, 'unique_until' => 'start', 'expires_in' => 300,
+      'expires_at' => '2099-01-02T03:04:05.000000000Z', 'track' => 1,
+      'on_dead' => { 'jobtype' => 'mail.bounced', 'queue' => 'dead_letters' }
+    }
+
+    Anway::Testing.fake!
+
+    I01WelcomeJob.set(**options).perform_async(1)
+    Anway.push('i01.welcome', [1], **options)
+
+    wire = Anway::Testing.jobs.map { |job| job.to_h.except('jid', 'backtrace') }
+
+    expect(wire).to eq([{ 'jobtype' => 'i01.welcome', 'queue' => 'low', 'args' => [1], 'custom' => custom }] * 2)
+
+    jid = client.push(Anway::Job.new('i01.welcome', [1], **options))
+    fetched = client.fetch('low')
+
+    expect(fetched).to have_attributes(jid: jid, type: 'i01.welcome')
+    expect(fetched.custom).to include(custom.except('expires_in', 'expires_at'))
+  end
+
+  it 'I02 merges two option sets in order' do
+    expect(I02MergedJob.anway_options).to eq(
+      event: 'i02.merged', queue: 'b', retry: 1, reserve_for: 60,
+      topics: %w[i02.one i02.two i02.three], custom: { 'source' => 'app', 'tenant' => 'b' }
+    )
+
+    expect(I02MergedJob.subscriptions.map(&:topic)).to eq(%w[i02.one i02.two i02.three])
+    expect(I02MergedJob.subscriptions.map { |item| [item.queue, item.event, item.retry, item.reserve_for] }.uniq).to eq(
+      [['b', 'i02.merged', 1, 60]]
+    )
+
+    expect(Anway::Worker.find('i02.merged')).to eq(I02MergedJob)
+    expect { Anway::Worker.find('i02.first') }.to raise_error(Anway::UnknownJob)
+
+    Anway::Testing.fake!
+
+    I02MergedJob.set(queue: 'c', custom: { 'trace' => 't1' }).perform_async
+
+    expect(Anway::Testing.jobs.last.to_h).to include(
+      'jobtype' => 'i02.merged', 'queue' => 'c', 'retry' => 1, 'reserve_for' => 60,
+      'custom' => { 'source' => 'app', 'tenant' => 'b', 'trace' => 't1' }
+    )
+
+    expect(Anway::Options.merge({ topics: %w[a b] }, { topics: %w[b c], queue: 'x' }, { queue: 'y' })).to eq(
+      topics: %w[a b c], queue: 'y'
+    )
+  end
+
+  it 'I03 raises for a second class with the same event' do
+    first = stub_const('I03FirstJob', Class.new)
+    second = stub_const('I03SecondJob', Class.new)
+
+    first.include(Anway::Worker)
+    first.anway_options(event: 'i03.same')
+    second.include(Anway::Worker)
+
+    expect { second.anway_options(event: 'i03.same') }.to raise_error(ArgumentError, /i03\.same.*I03FirstJob/)
+    expect(second.anway_options[:event]).to eq('I03SecondJob')
+    expect { stub_const('I03ThirdJob', Class.new(first)).anway_options(event: 'i03.same') }.to raise_error(ArgumentError)
+    expect(Anway::Worker.find('i03.same')).to eq(first)
+
+    reloaded = stub_const('I03FirstJob', Class.new)
+
+    reloaded.include(Anway::Worker)
+    reloaded.anway_options(event: 'i03.same')
+
+    expect(Anway::Worker.find('i03.same')).to eq(reloaded)
+  end
+
+  it 'I04 sends one SUBSCRIBE for each topic of a declaration, and runs the copies' do
+    I04AuditJob.received = []
+
+    log = StringIO.new
+
+    run_in_thread(Anway::Runner.new(url: server.url, concurrency: 1, queues: ['i04'], logger: Logger.new(log)))
+
+    wait_for { log.string.include?('anway started') }
+
+    %w[i04.created i04.deleted].each do |topic|
+      expect(log.string.scan("anway subscribed topic=#{topic} queue=i04 event=i04.audit").size).to eq(1)
+    end
+
+    created = client.publish('i04.created', [{ 'id' => 1 }])
+    deleted = client.publish('i04.deleted', [{ 'id' => 2 }])
+
+    expect([created.jobs, deleted.jobs]).to eq([1, 1])
+
+    wait_for { I04AuditJob.received.size == 2 }
+
+    expect(I04AuditJob.received).to contain_exactly(
+      [{ 'id' => 1 }, 'i04.audit', 'i04.created', 3, 90],
+      [{ 'id' => 2 }, 'i04.audit', 'i04.deleted', 3, 90]
+    )
   end
 end
 
@@ -448,7 +587,7 @@ RSpec.describe 'worker conformance' do
   it 'W06 fails unfinished jobs at server terminate' do
     BlockingJob.started = false
 
-    script = TerminatingServer.new(jid: 'blocked', jobtype: 'BlockingJob')
+    script = TerminatingServer.new(jid: 'blocked', event: 'BlockingJob')
     current = Anway::Runner.new(url: script.url, concurrency: 1, beat_interval: 0.02, timeout: 0.05, cancel_grace: 0.1)
     thread = run_in_thread(current)
 
@@ -573,7 +712,7 @@ RSpec.describe 'worker conformance' do
 
     wait_for { log.string.include?('anway started') }
 
-    expect(log.string).to include('anway subscribed topic=order.paid queue=billing jobtype=PaidOrderJob')
+    expect(log.string).to include('anway subscribed topic=order.paid queue=billing event=PaidOrderJob')
 
     first = client.publish('order.paid', [{ 'id' => 1 }])
     second = client.publish('order.paid', [{ 'id' => 2 }], id: 'order-2')
@@ -727,8 +866,8 @@ end
 class TerminatingServer
   attr_reader :failures
 
-  def initialize(jid:, jobtype:)
-    @job = JSON.generate('jid' => jid, 'jobtype' => jobtype, 'args' => [], 'queue' => 'default')
+  def initialize(jid:, event:)
+    @job = JSON.generate('jid' => jid, 'jobtype' => event, 'args' => [], 'queue' => 'default')
     @given = false
     @failures = []
     @lock = Mutex.new

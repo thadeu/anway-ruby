@@ -8,7 +8,9 @@ module Anway
   class ActiveJobWrapper
     include Anway::Worker
 
-    job_type 'ActiveJob'
+    EVENT = 'ActiveJob'
+
+    anway_options event: EVENT
 
     def perform(data)
       ActiveJob::Base.execute(data)
@@ -49,14 +51,14 @@ module ActiveJob
       # Each push has a new id. A retry_on attempt keeps its job_id while the
       # first attempt is still reserved, and the server rejects a repeated id.
       # custom.wrapped names the job class, so that the console shows it, as
-      # Sidekiq does.
+      # Sidekiq does. The options are the push keys of the input contract.
       def push(job, options)
         options = options.merge(queue: job.queue_name, backtrace: BACKTRACE, custom: { 'wrapped' => job.class.name })
 
         # retry_on owns the attempts, so its final error goes to the dead set.
         options[:retry] = DEAD_SET if job.class.anway_retry_on
 
-        pushed = Anway::Job.new('ActiveJob', [job.serialize.as_json], **options)
+        pushed = Anway::Job.new(Anway::ActiveJobWrapper::EVENT, [job.serialize.as_json], **options)
 
         job.provider_job_id = pushed.jid
 

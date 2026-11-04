@@ -123,7 +123,7 @@ RSpec.describe 'anway command' do
 
     startup = read_until(reader, 'anway started')
 
-    expect(startup).to include('anway subscribed topic=file.saved queue=audit jobtype=SavedFileJob')
+    expect(startup).to include('anway subscribed topic=file.saved queue=audit event=SavedFileJob')
     expect(startup).to include('queues=files,audit,default')
     expect(startup).not_to include('does not fetch')
     expect(client.publish('file.saved', [path]).jobs).to eq(1)

@@ -106,12 +106,12 @@ module Anway
         @client.subscribe(
           subscription.topic,
           queue: subscription.queue,
-          jobtype: subscription.jobtype,
+          event: subscription.event,
           retry: subscription.retry,
           reserve_for: subscription.reserve_for
         )
 
-        @logger.info("anway subscribed topic=#{subscription.topic} queue=#{subscription.queue} jobtype=#{subscription.jobtype}")
+        @logger.info("anway subscribed topic=#{subscription.topic} queue=#{subscription.queue} event=#{subscription.event}")
 
         next if @queues.names.include?(subscription.queue)
 
@@ -280,7 +280,7 @@ module Anway
     end
 
     def notify_error(error, job)
-      @logger.warn("job failed jid=#{job.jid} jobtype=#{job.type} error=#{error.class}: #{error.message}")
+      @logger.warn("job failed jid=#{job.jid} event=#{job.type} error=#{error.class}: #{error.message}")
 
       Anway.config.error_handlers.each { |handler| handler.call(error, job) }
     rescue StandardError => e
@@ -327,7 +327,7 @@ module Anway
 
       return unless claim(job.jid)
 
-      @logger.warn("job did not stop jid=#{job.jid} jobtype=#{job.type}")
+      @logger.warn("job did not stop jid=#{job.jid} event=#{job.type}")
 
       entry[:thread].kill
 
