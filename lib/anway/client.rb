@@ -10,6 +10,9 @@ module Anway
     DEFAULT_PORT = 7419
     FETCH_WAIT = 2
 
+    # The most jobs that one PUSHB takes.
+    MAX_BULK = 1000
+
     Endpoint = Data.define(:host, :port, :password, :tls)
 
     # The BEAT reply: the state (nil, "quiet", or "terminate"), and the thread
@@ -40,6 +43,20 @@ module Anway
       call('PUSH', job.to_h)
 
       job.jid
+    end
+
+    # Sends up to MAX_BULK jobs with one PUSHB. A refused job, such as a
+    # duplicate jid or a unique lock, does not stop the others. Returns the
+    # reason for each refused job by jid, or {} when all jobs are in. More
+    # than MAX_BULK jobs raise ArgumentError before the send.
+    def push_bulk(jobs)
+      jobs = jobs.to_a
+
+      raise ArgumentError, "a bulk push has at most #{MAX_BULK} jobs, not #{jobs.size}" if jobs.size > MAX_BULK
+
+      return {} if jobs.empty?
+
+      JSON.parse(call('PUSHB', jobs.map(&:to_h)))
     end
 
     # Returns the next job, or nil when no job arrives in about 2 seconds.

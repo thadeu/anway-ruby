@@ -57,6 +57,25 @@ module Anway
       job.jid
     end
 
+    # Sends the jobs with one PUSHB for each Client::MAX_BULK jobs. Returns
+    # the reason for each refused job by jid, from all the sends, or {} when
+    # all jobs are in. Inside a database transaction, the push waits for the
+    # commit and returns nil.
+    def push_bulk(jobs)
+      jobs = jobs.to_a
+      testing = const_defined?(:Testing) ? Testing : nil
+
+      return testing.push_bulk(jobs) if testing&.mode
+
+      failures = nil
+
+      config.push_wrapper.call do
+        failures = jobs.each_slice(Client::MAX_BULK).reduce({}) { |merged, slice| merged.merge(client.push_bulk(slice)) }
+      end
+
+      failures
+    end
+
     # Sends one event to each subscription of the topic. Returns a
     # Client::Published. Inside a database transaction, the publish waits for
     # the commit and returns nil.

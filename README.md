@@ -155,6 +155,29 @@ Anway.push('image.resize', [42], queue: 'media', expires_in: 600)
 Anway::Job.new('email.welcome', [1], unique_for: 60, queue: 'low')
 ```
 
+## Bulk push
+
+A bulk push sends many jobs with one `PUSHB` command, and the server puts them in with one write. Use it to push a large list of jobs fast. Bulk push needs server v0.3.2 or later.
+
+```ruby
+WelcomeJob.perform_bulk([[1], [2], [3]])
+# => {}
+
+WelcomeJob.set(queue: 'low', at: Time.now + 300).perform_bulk(users.map { |user| [user.id] })
+
+Anway.push_bulk([Anway::Job.new('image.resize', [1]), Anway::Job.new('image.resize', [2])])
+```
+
+- Each item of `perform_bulk` is the args of one job. The jobs get the options of the class and of `set`, as `perform_async` does.
+- The result is a hash with the reason for each job that the server refused, by jid. When all jobs are in, it is `{}`.
+- A refused job, such as a duplicate jid or a job that a unique lock blocks, does not stop the other jobs.
+- One `PUSHB` takes at most 1,000 jobs. `perform_bulk` and `Anway.push_bulk` split a longer list into several `PUSHB` commands, and merge the failures.
+- The gem builds all jobs before the first send. An item that is not valid raises `ArgumentError`, and no job goes to the server.
+- In a database transaction, the push waits for the commit, and the result is `nil`. A rollback cancels the push.
+- A list of more than 1,000 jobs uses more than one `PUSHB`. If a connection error occurs after the first `PUSHB`, the jobs of the earlier commands stay in, and the gem does not send them again.
+
+`client.push_bulk(jobs)` sends one `PUSHB`. It takes at most 1,000 jobs, and more raise `ArgumentError` before the send.
+
 ## Topics
 
 A topic sends one event to many queues. Each subscription of the topic gets one copy of the event, as a normal job in its own queue. Topics need server v0.3.0 or later.
@@ -200,6 +223,7 @@ config.active_job.queue_adapter = :anway
 - In a database transaction, a push waits for the commit, and a rollback cancels it. This also applies to `perform_async`.
 - A job with `retry_on` keeps ActiveJob attempts, and its final error goes to the dead set.
 - A job with no `retry_on` uses server retries.
+- `ActiveJob.perform_all_later(jobs)` sends one `PUSHB` for each 1,000 jobs, for jobs of all classes and queues. A job with `set(wait:)` or `set(wait_until:)` keeps its time. Each job gets `successfully_enqueued`, and a job that the server refused gets an `ActiveJob::EnqueueError` in `enqueue_error`.
 
 Tasks in `recurring.yml` and jobs that wait in Solid Queue do not move automatically. Move recurring tasks to the server cron, and drain the old queue first.
 
@@ -305,6 +329,8 @@ Anway::Testing.inline!
 
 In inline mode, `Anway.publish` runs one copy in each job class of the app that subscribes to the topic.
 
+`perform_bulk` and `Anway.push_bulk` work as single pushes do: fake mode adds each job to `Anway::Testing.jobs`, and inline mode runs each job. The result is `{}`.
+
 ## Client
 
 `Anway::Client` has the operations of [anway-go](https://github.com/thadeu/anway-go), in snake_case. It is safe for threads and for forks.
@@ -312,6 +338,7 @@ In inline mode, `Anway.publish` runs one copy in each job class of the app that 
 ```ruby
 client = Anway::Client.new('tcp://localhost:7419')
 client.push(Anway::Job.new('email.welcome', [1]))
+client.push_bulk([Anway::Job.new('email.welcome', [2]), Anway::Job.new('email.welcome', [3])])
 ```
 
 The error kinds are `Anway::NotUnique`, `Anway::Closed`, `Anway::ServerError`, and `Anway::ConnectionError`. A failed call does not resend.

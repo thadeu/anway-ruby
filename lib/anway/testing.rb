@@ -42,6 +42,14 @@ module Anway
         job.jid
       end
 
+      # Keeps or runs each job as a single push does. No job is refused, so
+      # the result is {}.
+      def push_bulk(jobs)
+        jobs.each { |job| enqueue(job) }
+
+        {}
+      end
+
       # Keeps the event as the PUBLISH payload, with string keys. jobs is the
       # number of subscriptions in the job classes of the app. There is no
       # duplicate check.

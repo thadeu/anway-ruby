@@ -125,6 +125,101 @@ RSpec.describe Anway::Worker do
   end
 end
 
+RSpec.describe 'Anway::Worker bulk push' do
+  it 'builds one job for each item from the class options in fake mode' do
+    Anway::Testing.fake!
+
+    expect(NamedJob.perform_bulk([['a@b.com'], ['c@d.com']])).to eq({})
+
+    jobs = Anway::Testing.jobs
+
+    expect(jobs.map(&:args)).to eq([['a@b.com'], ['c@d.com']])
+    expect(jobs.map(&:jid).uniq.size).to eq(2)
+
+    expect(jobs.map { |job| job.to_h.except('jid', 'args') }.uniq).to eq(
+      [{ 'jobtype' => 'email.send', 'queue' => 'mailers', 'retry' => 5, 'backtrace' => 30, 'custom' => { 'unique_for' => 60 } }]
+    )
+  end
+
+  it 'uses the options of set' do
+    Anway::Testing.fake!
+
+    NamedJob.set(queue: 'low', track: true, at: Time.utc(2099, 1, 1)).perform_bulk([['x'], ['y']])
+
+    expect(Anway::Testing.jobs.map(&:queue)).to eq(%w[low low])
+    expect(Anway::Testing.jobs.map(&:at)).to eq(['2099-01-01T00:00:00.000000000Z'] * 2)
+    expect(Anway::Testing.jobs.map(&:custom).uniq).to eq([{ 'unique_for' => 60, 'track' => 1 }])
+  end
+
+  it 'sends no job when one item is not valid' do
+    Anway::Testing.fake!
+
+    expect { NamedJob.perform_bulk([['ok'], 'not args']) }.to raise_error(ArgumentError)
+    expect { NamedJob.perform_bulk([['ok'], [:symbol]]) }.to raise_error(ArgumentError)
+    expect { NamedJob.perform_bulk('x') }.to raise_error(ArgumentError)
+    expect(Anway::Testing.jobs).to be_empty
+  end
+
+  it 'runs each job in inline mode' do
+    Anway::Testing.inline!
+    RoomMessageJob.received = []
+
+    RoomMessageJob.perform_bulk([['one'], ['two']])
+
+    expect(RoomMessageJob.received.map(&:first)).to eq(%w[one two])
+  end
+
+  it 'records bulk pushes of Anway.push_bulk in fake mode' do
+    Anway::Testing.fake!
+
+    jobs = [Anway::Job.new('image.resize', [1]), Anway::Job.new('image.resize', [2])]
+
+    expect(Anway.push_bulk(jobs)).to eq({})
+    expect(Anway::Testing.jobs.map(&:jid)).to eq(jobs.map(&:jid))
+  end
+
+  it 'splits more than 1,000 items into several PUSHB calls and merges the failures' do
+    server = start_server
+
+    Anway.config.url = server.url
+
+    calls = []
+
+    allow(Anway.client).to receive(:push_bulk).and_wrap_original do |original, slice|
+      calls << slice.size
+
+      original.call(slice)
+    end
+
+    items = Array.new(2500) { |index| [index] }
+
+    items[600] = [1]
+    items[1700] = [2]
+
+    failures = NamedJob.set(unique_for: 3600).perform_bulk(items)
+
+    expect(calls).to eq([1000, 1000, 500])
+    expect(failures.size).to eq(2)
+    expect(Anway.client.queue_sizes['mailers']).to eq(2498)
+  end
+
+  it 'waits for the push wrapper' do
+    Anway::Testing.disable!
+
+    deferred = []
+    wrapper = Anway.config.push_wrapper
+
+    Anway.config.push_wrapper = ->(&block) { deferred << block }
+
+    begin
+      expect(NamedJob.perform_bulk([['x']])).to be_nil
+      expect(deferred.size).to eq(1)
+    ensure
+      Anway.config.push_wrapper = wrapper
+    end
+  end
+end
+
 RSpec.describe Anway::Options do
   it 'lets a contract key win over a custom key with the same name' do
     wire = described_class.wire(unique_for: 60, custom: { 'unique_for' => 5, :tenant => 'a' })

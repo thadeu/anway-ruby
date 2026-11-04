@@ -14,6 +14,7 @@ module Anway
   #
   #   WelcomeJob.perform_async(42)
   #   WelcomeJob.set(queue: 'low', unique_for: 60).perform_async(42)
+  #   WelcomeJob.perform_bulk([[1], [2], [3]])
   #
   # The keys are the input contract (Anway::Options). The event is the job
   # type on the wire, and the default is the class name. Each topic makes one
@@ -158,16 +159,47 @@ module Anway
         Setter.new(self, options)
       end
 
-      # The options of the class, then the options of the push, merge with
-      # the same rules as two anway_options calls.
-      def enqueue_with(args, options)
-        declared = declared_options
-        push = Options.merge({ backtrace: DEFAULT_BACKTRACE }, declared.except(*OWN_KEYS), options)
+      # Pushes one job for each item, and each item is the args of one job:
+      # WelcomeJob.perform_bulk([[1], [2], [3]]). All jobs are built before
+      # the first send, so a bad item sends no job. Each Client::MAX_BULK jobs
+      # go in one PUSHB. Returns the reason for each refused job by jid, or {}
+      # when all jobs are in. Inside a database transaction, the push waits
+      # for the commit and returns nil.
+      def perform_bulk(args_list)
+        bulk_with(args_list, {})
+      end
 
-        Anway.enqueue(Job.new(declared[:event], args, **push))
+      def enqueue_with(args, options)
+        event, push = push_options(options)
+
+        Anway.enqueue(Job.new(event, args, **push))
+      end
+
+      def bulk_with(args_list, options)
+        raise ArgumentError, "perform_bulk needs an array of args: #{args_list.inspect}" unless args_list.is_a?(Array)
+
+        event, push = push_options(options)
+
+        jobs = args_list.map do |args|
+          Job.validate_args!(args)
+
+          Job.new(event, args, **push)
+        end
+
+        Anway.push_bulk(jobs)
       end
 
       private
+
+      # The event, and the push keys: the options of the class, then the
+      # options of the push, merge with the same rules as two anway_options
+      # calls.
+      def push_options(options)
+        declared = declared_options
+        push = Options.merge({ backtrace: DEFAULT_BACKTRACE }, declared.except(*OWN_KEYS), options)
+
+        [declared[:event], push]
+      end
 
       def declared_options
         parent = superclass.respond_to?(:anway_options) ? superclass.anway_options.except(*OWN_KEYS) : {}
@@ -211,6 +243,10 @@ module Anway
 
       def perform_in(seconds, *args)
         @klass.enqueue_with(args, @options.merge(at: Time.now + seconds.to_f))
+      end
+
+      def perform_bulk(args_list)
+        @klass.bulk_with(args_list, @options)
       end
     end
   end

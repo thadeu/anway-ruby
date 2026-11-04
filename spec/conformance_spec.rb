@@ -357,6 +357,32 @@ RSpec.describe 'client conformance' do
     expect { closed.push(Anway::Job.new('x')) }.to raise_error(Anway::Closed)
   end
 
+  it 'C17 pushes jobs in bulk and returns the reason for a refused jid' do
+    existing = client.push(Anway::Job.new('x', [0]))
+    jobs = [Anway::Job.new('x', [1]), Anway::Job.new('x', [2], jid: existing), Anway::Job.new('x', [3])]
+
+    failures = client.push_bulk(jobs)
+
+    expect(failures.keys).to eq([existing])
+    expect(failures[existing]).to be_a(String).and(satisfy { |reason| !reason.empty? })
+    expect(client.queue_sizes['default']).to eq(3)
+
+    fetched = Array.new(3) { client.fetch('default') }
+
+    expect(fetched.map(&:args)).to contain_exactly([0], [1], [3])
+    expect(client.push_bulk([Anway::Job.new('x', [4]), Anway::Job.new('x', [5])])).to eq({})
+    expect(client.queue_sizes['default']).to eq(2)
+  end
+
+  it 'C17 raises ArgumentError for more than 1,000 jobs, before the send' do
+    jobs = Array.new(Anway::Client::MAX_BULK + 1) { Anway::Job.new('x') }
+
+    expect { client.push_bulk(jobs) }.to raise_error(ArgumentError, /at most 1000/)
+    expect(client.queue_sizes).to eq({})
+    expect(client.push_bulk(jobs.first(Anway::Client::MAX_BULK))).to eq({})
+    expect(client.queue_sizes['default']).to eq(Anway::Client::MAX_BULK)
+  end
+
   it 'T01 publishes one copy to each subscription' do
     client.subscribe('chat.message', queue: 'realtime', event: 'chat.broadcast')
     client.subscribe('chat.message', queue: 'cassandra', event: 'chat.store', retry: 3)

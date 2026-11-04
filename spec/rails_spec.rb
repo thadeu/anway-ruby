@@ -25,12 +25,18 @@ RSpec.describe 'Rails integration' do
     expect(status.success?).to be(true), output
     expect(output).to include('in_transaction=1').and include('after_commit=2')
     expect(output).to include('wrapped=WriteJob')
+    expect(output).to include('bulk_calls=1 push_calls=0')
+    expect(output).to include('bulk_enqueued=3 bulk_count=3 bulk_ids=3')
+    expect(output).to include('bulk_mailers=4 bulk_scheduled=1')
+    expect(output).to include('refused_enqueued=true,false refused_count=1')
+    expect(output).to include('refused_error=ActiveJob::EnqueueError')
 
     pid = Process.spawn(env, RbConfig.ruby, "#{root}/exe/anway", chdir: dummy, out: File::NULL, err: File::NULL)
 
     begin
       wait_for(15) do
         File.exist?("#{path}.plain") && File.exist?("#{path}.committed") &&
+          File.exist?("#{path}.bulk_one") && File.exist?("#{path}.bulk_two") && File.exist?("#{path}.bulk_later") &&
           File.exist?("#{path}.flaky") && File.read("#{path}.flaky").lines.size == 3
       end
 
