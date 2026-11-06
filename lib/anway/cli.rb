@@ -17,12 +17,14 @@ module Anway
   # bundle exec anway server           only the server
   # bundle exec anway console          only the console
   # bundle exec anway worker -q mail   only workers
+  # bundle exec anway jobs [--set retries --type MyJob]   the jobs on the server
+  # bundle exec anway job JID [--full]                    one job, with its error
   class CLI
     EXIT_OK = 0
     EXIT_BOOT = 1
     EXIT_USAGE = 2
     DEFAULTS = { concurrency: 10, timeout: 25, labels: [] }.freeze
-    COMMANDS = %w[server console worker].freeze
+    COMMANDS = %w[server console worker jobs job].freeze
     RAILS_ENTRY = 'config/environment.rb'
 
     def initialize(argv)
@@ -36,6 +38,8 @@ module Anway
       return EXIT_OK if parse == :done
 
       boot
+
+      return inspect_jobs if %w[jobs job].include?(@command)
 
       return Server.new(@settings).exec if @command == 'server'
       return Console.new(@settings).exec if @command == 'console'
@@ -63,6 +67,9 @@ module Anway
       parser.parse!(@argv)
 
       @command = @argv.shift if COMMANDS.include?(@argv.first)
+      @jid = @argv.shift if @command == 'job'
+
+      raise ArgumentError, 'anway job needs a jid' if @command == 'job' && @jid.to_s.empty?
 
       raise ArgumentError, "unexpected argument: #{@argv.first}" unless @argv.empty?
 
@@ -71,7 +78,7 @@ module Anway
 
     def parser
       OptionParser.new do |options|
-        options.banner = 'Usage: anway [server|console|worker] [options]'
+        options.banner = 'Usage: anway [server|console|worker|jobs|job JID] [options]'
 
         options.on('-q', '--queues LIST', 'Queues in order, as name or name:weight') do |list|
           @flags[:queues] = list.split(',').map { |entry| entry.split(':') }
@@ -86,6 +93,12 @@ module Anway
         options.on('-g', '--tag NAME', 'Name of the app in the console') { |name| @flags[:tag] = name }
         options.on('-a', '--autoscale MAX', Integer, 'Turn on autoscale, up to MAX threads') { |n| @flags[:autoscale] = { max: n } }
         options.on('-v', '--verbose', 'Debug logs') { @flags[:verbose] = true }
+        options.on('--set SET', 'jobs: waiting, working, retries, scheduled, dead, or queue:NAME') { |set| @flags[:set] = set }
+        options.on('--type TYPE', 'jobs: a part of the job type or Active Job class') { |type| @flags[:type] = type }
+        options.on('--queue NAME', 'jobs: only this queue') { |name| @flags[:queue] = name }
+        options.on('--limit N', Integer, 'jobs: at most N jobs (20)') { |n| @flags[:limit] = n }
+        options.on('--full', 'job: the whole backtrace') { @flags[:full] = true }
+        options.on('--json', 'jobs, job: the API answer as JSON') { @flags[:json] = true }
 
         options.on('-V', '--version', 'Print the version') do
           puts "anway #{VERSION}"
@@ -101,6 +114,26 @@ module Anway
       end
     end
 
+    # anway jobs and anway job read the server's HTTP API. They need no app
+    # and start nothing. When no server answers, they say so and exit 1.
+    def inspect_jobs
+      command = InspectCommand.new(Api.from_settings(@settings))
+
+      return (command.show(@jid, full: @flags[:full], json: @flags[:json]) ? EXIT_OK : EXIT_BOOT) if @command == 'job'
+
+      if @flags[:set] || @flags[:type]
+        command.list(set: @flags[:set] || 'waiting', type: @flags[:type], queue: @flags[:queue], limit: @flags[:limit] || 20, json: @flags[:json])
+      else
+        command.summary(json: @flags[:json])
+      end
+
+      EXIT_OK
+    rescue Api::Unreachable => e
+      warn("anway: #{e.message}")
+
+      EXIT_BOOT
+    end
+
     def boot
       environment = @flags[:environment] || ENV['RAILS_ENV'] || ENV['APP_ENV'] || 'development'
 
@@ -111,6 +144,7 @@ module Anway
       @options = DEFAULTS.merge(@settings.worker_options).merge(@flags)
 
       Anway.config.logger.level = Logger::DEBUG if @options[:verbose]
+      Anway.config.log_tags = @settings.log_tags?
     end
 
     # The app loads first, so that a usage error never leaves a server running.

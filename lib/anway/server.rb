@@ -38,6 +38,13 @@ module Anway
 
     def prepare
       FileUtils.mkdir_p(@settings.data)
+
+      save_web_token if @settings.random_web_token?
+    end
+
+    def save_web_token
+      File.open(@settings.web_token_file, File::WRONLY | File::CREAT | File::TRUNC, 0o600) { |file| file.write(@settings.web_token) }
+      File.chmod(0o600, @settings.web_token_file)
     end
 
     def announce

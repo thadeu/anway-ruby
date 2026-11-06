@@ -13,7 +13,7 @@ RSpec.describe Anway::Settings do
 
     expect(subject.mode).to eq('embedded')
     expect(subject.client_url).to eq('tcp://127.0.0.1:7419')
-    expect(subject.server_env).to eq('BIND_ADDR' => '127.0.0.1:7419', 'DATA_DIR' => File.expand_path('storage/anway'))
+    expect(subject.server_env).to include('BIND_ADDR' => '127.0.0.1:7419', 'DATA_DIR' => File.expand_path('storage/anway'), 'WEB_ADDR' => '127.0.0.1:7420')
   end
 
   it 'uses an external server when the file has a url' do
@@ -52,8 +52,9 @@ RSpec.describe Anway::Settings do
     expect(subject.server_env).to include('BIND_ADDR' => '0.0.0.0:7500', 'SERVER_PASSWORD' => 'secret')
   end
 
-  it 'opens the HTTP API for the web console only when web is set' do
-    expect(settings.server_env.keys).not_to include('WEB_ADDR', 'WEB_TOKEN')
+  it 'opens the HTTP API of an embedded server on the loopback, and of an external one only when web is set' do
+    expect(settings.server_env).to include('WEB_ADDR' => '127.0.0.1:7420')
+    expect(settings({ 'url' => 'tcp://x:7419' }).web).to be_nil
 
     subject = settings({ 'server' => { 'web' => '127.0.0.1:7420', 'web_token' => 'dev' } })
 
@@ -62,7 +63,6 @@ RSpec.describe Anway::Settings do
 
   it 'starts no console without a binary' do
     expect(settings).not_to be_console
-    expect(settings.web).to be_nil
   end
 
   it 'opens the server API for a console next to an embedded server, with one shared token' do
@@ -125,7 +125,7 @@ RSpec.describe Anway::Settings do
   it 'tells when the web token is random' do
     expect(settings({ 'server' => { 'web' => '127.0.0.1:7420' } })).to be_random_web_token
     expect(settings({ 'server' => { 'web' => '127.0.0.1:7420', 'web_token' => 'fixed' } })).not_to be_random_web_token
-    expect(settings).not_to be_random_web_token
+    expect(settings({ 'url' => 'tcp://x:7419' })).not_to be_random_web_token
   end
 end
 

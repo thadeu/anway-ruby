@@ -23,7 +23,7 @@ module Anway
     DEFAULT_WEB = '127.0.0.1:7420'
     DEFAULT_CONSOLE = '127.0.0.1:7421'
     MODES = %w[embedded external].freeze
-    KEYS = %w[queues concurrency timeout labels hostname tag autoscale require url server console].freeze
+    KEYS = %w[queues concurrency timeout labels hostname tag autoscale require url server console log_tags].freeze
     SERVER_KEYS = %w[mode bind data password web web_token].freeze
     CONSOLE_KEYS = %w[path bind api token].freeze
 
@@ -63,6 +63,11 @@ module Anway
       options[:autoscale] = autoscale
 
       options.compact
+    end
+
+    # log_tags: false turns off the job tags on log lines. On by default.
+    def log_tags?
+      @values['log_tags'] != false
     end
 
     # autoscale: { max: n } or { min: n, max: n }, or nil when it is off.
@@ -110,16 +115,43 @@ module Anway
       "tcp://#{auth}#{Daemon.local_host(host)}:#{port}"
     end
 
-    # The address of the HTTP API that the web console reads. It is off
-    # unless it is set, or the console runs next to an embedded server.
+    # The address of the HTTP API that the web console and `anway jobs` read.
+    # An embedded server opens it on the loopback; an external one only when
+    # it is set.
     def web
-      present(@server['web']) || (console? && embedded? ? DEFAULT_WEB : nil)
+      present(@server['web']) || (embedded? ? DEFAULT_WEB : nil)
     end
 
-    # Without a token in the file, the server and the console that this
-    # process starts share a random one.
+    # Without a token in the file, the server and the console share a random
+    # one. A running embedded server saved its token in the data folder, so
+    # every process of the app (Puma, workers, `anway jobs`) uses the same.
     def web_token
-      present(@server['web_token']) || (web ? (@random_token ||= SecureRandom.hex(16)) : nil)
+      present(@server['web_token']) || (web ? (@random_token ||= saved_web_token || SecureRandom.hex(16)) : nil)
+    end
+
+    # True when a random token was saved by a server of this data folder, so
+    # another process can use that server.
+    def saved_web_token?
+      !saved_web_token.nil?
+    end
+
+    # The file where an embedded server keeps its random web token, so that
+    # `anway jobs` in another process can read the API. Only this user can
+    # read it.
+    def web_token_file
+      File.join(File.expand_path(data), 'web_token')
+    end
+
+    # The HTTP API that `anway jobs` and Anway.jobs read: ANWAY_API_URL, then
+    # console.api, then the embedded server's API.
+    def api_url
+      present(@env['ANWAY_API_URL']) || console_api
+    end
+
+    # Its token: ANWAY_WEB_TOKEN, then console.token, then server.web_token,
+    # then the token file of a running embedded server.
+    def api_token
+      present(@env['ANWAY_WEB_TOKEN']) || present(@console['token']) || present(@server['web_token']) || saved_web_token
     end
 
     # A random token changes at each start, so a server or console from an
@@ -179,6 +211,12 @@ module Anway
     end
 
     private
+
+    def saved_web_token
+      present(File.read(web_token_file).strip)
+    rescue SystemCallError
+      nil
+    end
 
     def section_of(hash, name, keys)
       value = hash[name]

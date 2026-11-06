@@ -26,7 +26,7 @@ module Anway
     # random web token, that process has another token, so the start fails.
     def start
       if listening?
-        raise Error, "a #{name} already listens on #{address} with another web token. Stop it, or set server.web_token in config/anway.yml." if @settings.random_web_token?
+        raise Error, "a #{name} already listens on #{address} with another web token. Stop it, or set server.web_token in config/anway.yml." if @settings.random_web_token? && !@settings.saved_web_token?
 
         @logger.info("anway: a #{name} already listens on #{address}, so this process uses it")
 

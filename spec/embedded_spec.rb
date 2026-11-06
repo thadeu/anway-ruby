@@ -141,13 +141,20 @@ RSpec.describe 'embedded server' do
       expect(server.pid).to be_nil
     end
 
-    it 'does not use a server from an earlier start when the web token is random' do
+    it 'uses a running server with the random token it saved, and refuses one without it' do
       new_server.start
 
       content = { 'server' => { 'bind' => bind, 'data' => "#{dir}/data", 'web' => "127.0.0.1:#{free_port}" } }
       random = Anway::Settings.new(content, environment: 'development', env: {})
 
-      expect { described_class.new(random).start }.to raise_error(Anway::Error, /another web token.*server.web_token/)
+      expect(File.stat(random.web_token_file).mode & 0o777).to eq(0o600)
+      expect(described_class.new(random).start).to be(false)
+
+      File.delete(random.web_token_file)
+
+      fresh = Anway::Settings.new(content, environment: 'development', env: {})
+
+      expect { described_class.new(fresh).start }.to raise_error(Anway::Error, /another web token.*server.web_token/)
     end
 
     it 'explains how to go on when no binary exists for the platform' do

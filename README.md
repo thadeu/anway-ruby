@@ -325,6 +325,59 @@ At a stop, jobs get `--timeout` seconds to finish. Then `Anway::Shutdown` is rai
 
 Keep the database pool at the concurrency value or more. A job queue with no worker has no error, and its jobs wait.
 
+## Debugging jobs
+
+When a job "did not run", ask the server. `anway jobs` reads its HTTP API with the app's settings, starts nothing, and needs no browser:
+
+```
+$ bin/anway jobs
+waiting      3   oldest 4s   mail.send
+working      1   EmitInvoiceJob on mbp:84600
+retries      2   EmitInvoiceJob ×2   Net::ReadTimeout: execution expired
+scheduled    0
+dead         0
+
+$ bin/anway jobs --set retries --type EmitInvoice
+JID       TYPE            QUEUE    TRY  NEXT    ERROR
+a1b2c3d4  EmitInvoiceJob  default  2    in 38s  Net::ReadTimeout: execution expired
+
+$ bin/anway job a1b2c3d4
+EmitInvoiceJob (Active Job, wrapper Anway::ActiveJobWrapper)
+state     retries (try 2, next run 16:42:10)
+queue     default
+args      ["15063a22-f96b-41d9-b744-411a0ba69833"]
+error     Net::ReadTimeout: execution expired
+          app/services/nfse/sefin_client.rb:88:in 'post'
+          app/jobs/emit_invoice_job.rb:14:in 'perform'
+          (8 lines more, --full shows all)
+```
+
+- `--set` is `waiting`, `working`, `retries`, `scheduled`, `dead`, or `queue:<name>`. `--type` matches a part of the job type or of the Active Job class. `--queue`, `--limit` (20), `--full`, and `--json` (the API answer, for scripts and agents).
+- A finished job is not kept: `anway job` says `not found: it finished, or it never existed` and exits 1. With no server, it says `no server at ... (is bin/dev running?)` and exits 1.
+- The API: an embedded server opens it on `127.0.0.1:7420` and saves its random token in its data folder (only your user can read it), so every process of the app finds it. For a server that runs apart, set `ANWAY_API_URL` and `ANWAY_WEB_TOKEN`, or `console.api` and `console.token`.
+
+In the Rails console, or in the tests of the app:
+
+```ruby
+Anway.jobs                                              # the summary
+Anway.jobs(set: :retries, type: "EmitInvoiceJob").first(5)
+Anway.job(EmitInvoiceJob.perform_later(id).provider_job_id)  # Anway::JobInfo, or nil
+```
+
+`Anway::JobInfo` has `jid`, `type`, `wrapped`, `name`, `queue`, `state`, `args`, `custom`, `retry_count`, `next_at`, `enqueued_at`, `started_at`, `worker`, and `error` (`class`, `message`, `backtrace`). `Anway.jobs(set:)` reads pages only as far as you read. With `Anway::Testing.fake!`, both read the fake jobs.
+
+### Job tags on log lines
+
+While a job runs, every line of the app logger carries the job, Active Record and HTTP client lines too:
+
+```
+[anway EmitInvoiceJob jid=a1b2c3d4 try=2] Invoice Load (0.4ms) SELECT "invoices".* ...
+anway done   EmitInvoiceJob jid=a1b2c3d4 312ms
+anway failed EmitInvoiceJob jid=a1b2c3d4 try=2 Net::ReadTimeout: execution expired (retry) 5012ms
+```
+
+So `grep jid=a1b2c3d4 log/development.log` shows one run, and `grep EmitInvoiceJob` every run of the class. The tags need a tagged logger, which `Rails.logger` is; with another logger nothing changes. Tags are per thread, so jobs on other threads keep their own. `log_tags: false` in `config/anway.yml` turns them off.
+
 ## Tests in your app
 
 ```ruby

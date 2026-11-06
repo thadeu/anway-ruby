@@ -17,6 +17,10 @@ require_relative 'anway/daemon'
 require_relative 'anway/server'
 require_relative 'anway/console'
 require_relative 'anway/web'
+require_relative 'anway/api'
+require_relative 'anway/job_info'
+require_relative 'anway/inspect'
+require_relative 'anway/inspect_command'
 require_relative 'anway/puma/plugin'
 require_relative 'anway/railtie' if defined?(Rails::Railtie)
 
@@ -113,11 +117,54 @@ module Anway
       results
     end
 
+    # The jobs on the server. With no set, a summary of each set. With a set
+    # (:waiting, :working, :retries, :scheduled, :dead or "queue:name"), an
+    # Enumerable of JobInfo that reads pages only as far as it is read.
+    #
+    #   Anway.jobs
+    #   Anway.jobs(set: :retries, type: "EmitInvoiceJob").first(5)
+    def jobs(set: nil, type: nil, queue: nil)
+      if fake_testing?
+        infos = Inspect.fake(Testing.jobs)
+
+        return set ? infos.select { |info| set.to_s == 'waiting' && (type.nil? || info.name.include?(type.to_s)) && (queue.nil? || info.queue == queue) } : Inspect::Summary.new(sets: [{ set: 'waiting', count: infos.size }])
+      end
+
+      return Inspect.summary(api) unless set
+
+      Inspect::Jobs.new(api, set: set, type: type, queue: queue)
+    end
+
+    # One job by its jid, as JobInfo, or nil when it finished or never
+    # existed. Active Job sets provider_job_id to the jid:
+    #
+    #   Anway.job(MyJob.perform_later(id).provider_job_id)
+    def job(jid)
+      return Inspect.fake(Testing.jobs).find { |info| info.jid == jid } if fake_testing?
+
+      reply = api.job(jid)
+
+      reply && JobInfo.from_api(reply['job'], set: reply['set'])
+    end
+
+    # The HTTP API client for Anway.jobs and Anway.job.
+    def api
+      @api ||= Api.from_settings
+    end
+
+    attr_writer :api
+
     def reset!
       @lock.synchronize do
         @client&.close
         @client = nil
       end
+
+      @api = nil
     end
+
+    private
+
+    def fake_testing? = const_defined?(:Testing) && Testing.mode == :fake
   end
 end

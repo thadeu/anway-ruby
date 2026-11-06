@@ -13,6 +13,7 @@ module Anway
     ERROR_PAUSE = 1
     EMPTY_FETCH_MINIMUM = 0.2
     BACKTRACE_LINES = 30
+    DEFAULT_RETRY = 25
 
     attr_reader :wid
 
@@ -270,18 +271,59 @@ module Anway
     end
 
     def perform(job)
-      Thread.handle_interrupt(Shutdown => :immediate) { Executor.call(job) }
+      started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+
+      tagged(job) { Thread.handle_interrupt(Shutdown => :immediate) { Executor.call(job) } }
+
+      @logger.info("anway done   #{job_label(job)} #{elapsed(started)}ms")
 
       nil
     rescue Exception => e # rubocop:disable Lint/RescueException
-      notify_error(e, job) unless e.is_a?(Shutdown)
+      unless e.is_a?(Shutdown)
+        @logger.warn("anway failed #{job_label(job)} try=#{try_of(job)} #{e.class}: #{e.message} (#{after_failure(job)}) #{elapsed(started)}ms")
+
+        notify_error(e, job)
+      end
 
       e
     end
 
-    def notify_error(error, job)
-      @logger.warn("job failed jid=#{job.jid} event=#{job.type} error=#{error.class}: #{error.message}")
+    # While a job runs, every line of a tagged logger (Rails.logger, and with
+    # it Active Record) carries the job. Tags are per thread, so jobs on two
+    # threads keep their own. A logger without tags, or an error in it, never
+    # stops the job.
+    def tagged(job, &block)
+      logger = Anway.config.logger
 
+      return yield unless Anway.config.log_tags && logger.respond_to?(:tagged)
+
+      logger.tagged("anway #{job_label(job)} try=#{try_of(job)}", &block)
+    end
+
+    def job_label(job)
+      wrapped = job.custom.is_a?(Hash) ? job.custom['wrapped'] : nil
+
+      "#{wrapped || job.type} jid=#{job.jid}"
+    end
+
+    def try_of(job)
+      job.failure.is_a?(Hash) ? job.failure['retry_count'].to_i + 2 : 1
+    end
+
+    # What the server does with this failure (job-lifecycle.md): retry while
+    # retries are left, then dead; retry 0 discards, retry -1 goes to dead.
+    def after_failure(job)
+      retries = job.retry.nil? ? DEFAULT_RETRY : job.retry.to_i
+
+      return 'discarded' if retries.zero?
+      return 'dead' if retries.negative? || try_of(job) > retries
+
+      'retry'
+    end
+
+    def elapsed(started) = ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - started) * 1000).round
+
+    def notify_error(error, job)
       Anway.config.error_handlers.each { |handler| handler.call(error, job) }
     rescue StandardError => e
       @logger.error("error handler failed: #{e.message}")
