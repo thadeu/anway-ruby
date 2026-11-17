@@ -185,6 +185,23 @@ module Anway
       true
     end
 
+    # Replaces all cron entries of the tag on the server, so an entry that is
+    # not in entries goes away. No entries removes the tag. Each entry is a
+    # hash in the format of Anway::Cron. A bad schedule or an entry with no
+    # job type raises ServerError, and then nothing changes.
+    def schedule(tag, entries)
+      call('SCHEDULE', { tag: tag, entries: Cron.entries(entries.to_a) })
+
+      true
+    end
+
+    # Removes all cron entries of the tag. A missing tag is not an error.
+    def unschedule(tag)
+      call('UNSCHEDULE', { tag: tag })
+
+      true
+    end
+
     def batch_new(success: nil, complete: nil, parent_bid: nil, description: nil)
       definition = {
         success: success&.to_h, complete: complete&.to_h, parent_bid: parent_bid, description: description

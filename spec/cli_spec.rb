@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require 'net/http'
 require 'open3'
 require 'rbconfig'
 require 'timeout'
@@ -143,6 +144,30 @@ RSpec.describe 'anway command' do
 
     expect(startup).to include('does not fetch queue audit, so the events of topic file.saved wait there')
     expect(startup).to include('queues=files,default')
+  end
+
+  it 'sends the cron of the classes and of the YAML file with the tag, and fetches their queues' do
+    web = "127.0.0.1:#{TCPServer.new('127.0.0.1', 0).then { |socket| socket.addr[1].tap { socket.close } }}"
+    server = start_server('WEB_ADDR' => web, 'WEB_TOKEN' => 't')
+    _pid, reader = spawn_cli(server.url, '-r', 'spec/fixtures/cron_jobs.rb', '-C', 'spec/fixtures/cron.yml')
+
+    startup = read_until(reader, 'anway started')
+
+    expect(startup).to include('anway scheduled tag=shop cron=2')
+    expect(startup).to include('queues=reports,billing,default')
+
+    api = Net::HTTP.new(*web.split(':').then { |host, port| [host, port.to_i] })
+    cron = JSON.parse(api.get('/api/v1/schedules', 'Authorization' => 'Bearer t').body)['cron']
+
+    expect(cron.map { |entry| entry.values_at('tag', 'jobtype', 'queue') }).to eq([%w[shop DailyReportJob reports], %w[shop credits.refill billing]])
+  end
+
+  it 'exits with 2 when the app declares cron and sets no tag' do
+    server = start_server
+    pid, reader = spawn_cli(server.url, '-r', 'spec/fixtures/cron_jobs.rb')
+
+    expect(read_until(reader, 'no tag')).to include('set tag in config/anway.yml')
+    expect(wait_exit(pid)).to eq(2)
   end
 
   it 'stops fetching at TSTP and stays alive' do

@@ -9,13 +9,18 @@ module Anway
   #   Anway::Testing.inline!  runs each job at push, and each event in the
   #                           subscribed classes of the app at publish
   #   Anway::Testing.disable! uses the real client
+  #
+  # In both test modes, Anway.schedule and Anway.unschedule change
+  # Testing.schedules, a hash of the cron entries of each tag. Anway.cron
+  # lists the cron entries that the worker of the app declares.
   module Testing
     @mode = nil
     @jobs = []
     @events = []
+    @schedules = {}
 
     class << self
-      attr_reader :jobs, :events, :mode
+      attr_reader :jobs, :events, :schedules, :mode
 
       def fake!
         @mode = :fake
@@ -32,6 +37,24 @@ module Anway
       def clear
         @jobs.clear
         @events.clear
+        @schedules.clear
+      end
+
+      # Keeps the entries of the tag, in the format of Anway::Cron, as the
+      # server does: they replace the entries of the tag, and no entries
+      # remove it. The server checks the schedules, and this does not.
+      def schedule(tag, entries)
+        entries = Cron.entries(entries.to_a)
+
+        entries.empty? ? @schedules.delete(tag.to_s) : @schedules[tag.to_s] = entries
+
+        true
+      end
+
+      def unschedule(tag)
+        @schedules.delete(tag.to_s)
+
+        true
       end
 
       def enqueue(job)

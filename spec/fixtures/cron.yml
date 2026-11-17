@@ -1,0 +1,8 @@
+tag: shop
+
+cron:
+  - schedule: "0 0 * * *"
+    job:
+      type: credits.refill
+      queue: billing
+      retry: 3

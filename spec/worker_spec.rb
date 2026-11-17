@@ -72,13 +72,13 @@ RSpec.describe Anway::Worker do
     expect(PlainSubscriberJob.anway_options[:event]).to eq('PlainSubscriberJob')
   end
 
-  it 'inherits all options except event and topics' do
+  it 'inherits all options except event, topics, and cron' do
     expect(ChildJob.anway_options).to eq(
-      event: 'child.job', topics: [], queue: 'mailers', retry: 1, custom: { 'unique_for' => 60 }
+      event: 'child.job', topics: [], cron: [], queue: 'mailers', retry: 1, custom: { 'unique_for' => 60 }
     )
 
     expect(LateMessageJob.anway_options).to eq(
-      event: 'LateMessageJob', topics: [], queue: 'realtime', retry: 2, reserve_for: 120
+      event: 'LateMessageJob', topics: [], cron: [], queue: 'realtime', retry: 2, reserve_for: 120
     )
   end
 

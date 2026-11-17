@@ -534,7 +534,7 @@ RSpec.describe 'input contract conformance' do
   it 'I02 merges two option sets in order' do
     expect(I02MergedJob.anway_options).to eq(
       event: 'i02.merged', queue: 'b', retry: 1, reserve_for: 60,
-      topics: %w[i02.one i02.two i02.three], custom: { 'source' => 'app', 'tenant' => 'b' }
+      topics: %w[i02.one i02.two i02.three], cron: [], custom: { 'source' => 'app', 'tenant' => 'b' }
     )
 
     expect(I02MergedJob.subscriptions.map(&:topic)).to eq(%w[i02.one i02.two i02.three])

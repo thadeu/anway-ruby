@@ -209,6 +209,8 @@ module Anway
         labels: @options[:labels],
         hostname: @options[:hostname],
         tag: @options[:tag] || default_tag,
+        cron: Anway.cron(@settings),
+        cron_tag: @options[:tag],
         autoscale: @options[:autoscale],
         limit: database_pool
       )
@@ -233,14 +235,15 @@ module Anway
       Signal.trap('TTIN') { runner.dump }
     end
 
-    # Without a list, the worker uses the queues of its job classes and of
-    # their subscriptions. With a list, the runner logs a warning for each
+    # Without a list, the worker uses the queues of its job classes, of their
+    # subscriptions, and of the cron entries. With a list, the runner logs a warning for each
     # subscription queue that is not in it.
     def queues
       return @options[:queues] if @options[:queues]
 
       names = Worker.classes.map { |klass| klass.anway_options[:queue]&.to_s }
       names.concat(Worker.subscriptions.map(&:queue))
+      names.concat(Anway.cron(@settings).map { |entry| entry.dig('job', 'queue') || 'default' })
       names.concat(active_job_queues)
 
       [*names.compact, 'default'].uniq

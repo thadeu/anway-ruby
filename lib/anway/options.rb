@@ -16,6 +16,8 @@ module Anway
   #                on_dead { event:, queue: } as { "jobtype", "queue" }
   #   custom       custom, for the keys of the app. The keys above win.
   #   topics       one SUBSCRIBE for each topic (a declaration only)
+  #   cron         one entry of the SCHEDULE of the worker for each cron
+  #                schedule (a declaration only)
   module Options
     # Keys with a wire field of the same name.
     FIELDS = %i[queue retry reserve_for backtrace at].freeze
@@ -27,8 +29,8 @@ module Anway
     PUSH = [*FIELDS, *CUSTOM, :custom].freeze
 
     # The keys of a declaration: anway_options. at is only for a push, and
-    # topics only for a declaration.
-    DECLARATION = [:event, *(PUSH - [:at]), :topics].freeze
+    # topics and cron only for a declaration.
+    DECLARATION = [:event, *(PUSH - [:at]), :topics, :cron].freeze
 
     ON_DEAD = %i[event queue].freeze
 
@@ -43,14 +45,14 @@ module Anway
     end
 
     # Merges option sets in order. A single value from a later set wins.
-    # topics add up in order, with no duplicates. custom hashes merge, and a
-    # later key wins.
+    # topics and cron add up in order, with no duplicates. custom hashes
+    # merge, and a later key wins.
     def merge(*sets)
       sets.each_with_object({}) do |set, merged|
         set.each do |key, value|
           merged[key] =
             case key
-            when :topics then (merged[:topics] || []) | Array(value).map(&:to_s)
+            when :topics, :cron then (merged[key] || []) | Array(value).map(&:to_s)
             when :custom then (merged[:custom] || {}).merge(stringify(value))
             else value
             end

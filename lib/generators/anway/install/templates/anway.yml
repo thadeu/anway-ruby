@@ -18,6 +18,15 @@ concurrency: 10
 # autoscale:
 #   max: 20
 
+# Cron entries that the worker sends to the server when it starts, as the
+# cron entries of the server conf.d. They need a tag. A job class can also
+# declare them: anway_options cron: "0 0 * * *". Schedules use UTC.
+# cron:
+#   - schedule: "0 0 * * *"
+#     job:
+#       type: credits.refill
+#       queue: default
+
 # The web console. bin/anway starts it next to the server, and
 # `mount Anway::Web` in config/routes.rb serves it in the app.
 # console:

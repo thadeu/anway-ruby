@@ -23,11 +23,19 @@ module Anway
     # as { max: n } or { min: n, max: n }, starts the worker with autoscale on.
     # subscriptions is a list of Worker::Subscription. The default is the
     # subscriptions of all registered job classes, read at run.
+    #
+    # cron is a list of cron entries (Anway::Cron). The default is the entries
+    # of all registered job classes, read at run. The runner sends them in one
+    # SCHEDULE with cron_tag, which is tag by default. With entries and no
+    # cron_tag, run raises ArgumentError: a default tag could join the entries
+    # of two apps on one server.
     def initialize(queues: ['default'], concurrency: 10, timeout: 25, cancel_grace: 5, labels: [],
                    hostname: nil, tag: nil, autoscale: nil, limit: nil, subscriptions: nil,
-                   beat_interval: BEAT_INTERVAL, url: nil, logger: Anway.config.logger)
+                   cron: nil, cron_tag: tag, beat_interval: BEAT_INTERVAL, url: nil, logger: Anway.config.logger)
       @queues = Queues.new(queues)
       @subscriptions = subscriptions
+      @cron = cron
+      @cron_tag = cron_tag
       @concurrency = concurrency
       @limit = limit
       @timeout = timeout
@@ -73,11 +81,15 @@ module Anway
     end
 
     # The first beat reports the threads, so the server can scale the worker
-    # at once. The subscriptions go to the server before the first fetch.
+    # at once. The subscriptions and the cron entries go to the server before
+    # the first fetch.
     def run
+      cron = cron_entries
+
       @client.heartbeat(nil, concurrency: @concurrency)
 
       subscribe_all
+      schedule_all(cron)
 
       @lock.synchronize { @processors = Array.new(@concurrency) { start_processor } }
 
@@ -117,6 +129,34 @@ module Anway
         next if @queues.names.include?(subscription.queue)
 
         @logger.warn("anway does not fetch queue #{subscription.queue}, so the events of topic #{subscription.topic} wait there. Add the queue to queues.")
+      end
+    end
+
+    def cron_entries
+      entries = @cron || Worker.cron_entries
+
+      return entries if entries.empty? || @cron_tag
+
+      raise ArgumentError, 'anway has cron entries but no tag: set tag in config/anway.yml, ANWAY_TAG, or --tag. ' \
+                           'The server keeps the cron entries of each tag.'
+    end
+
+    # SCHEDULE replaces the entries of the tag, so an entry that the app
+    # removed goes away. With no entries, the runner sends nothing, so it does
+    # not remove the entries that another process sent for the tag.
+    def schedule_all(entries)
+      return if entries.empty?
+
+      @client.schedule(@cron_tag, entries)
+
+      @logger.info("anway scheduled tag=#{@cron_tag} cron=#{entries.size}")
+
+      entries.each do |entry|
+        queue = entry.dig('job', 'queue') || 'default'
+
+        next if @queues.names.include?(queue)
+
+        @logger.warn("anway does not fetch queue #{queue}, so the cron jobs #{entry.dig('job', 'type')} wait there. Add the queue to queues.")
       end
     end
 

@@ -8,6 +8,7 @@ module Anway
   #
   #     anway_options event: 'email.welcome', retry: 5
   #     anway_options topics: %w[user.created], queue: 'mailers'
+  #     anway_options cron: '0 9 * * *'
   #
   #     def perform(user_id); end
   #   end
@@ -18,7 +19,8 @@ module Anway
   #
   # The keys are the input contract (Anway::Options). The event is the job
   # type on the wire, and the default is the class name. Each topic makes one
-  # subscription, which the worker sends when it starts.
+  # subscription, and each cron schedule one cron entry. The worker sends both
+  # when it starts.
   module Worker
     DEFAULT_BACKTRACE = 30
 
@@ -27,7 +29,7 @@ module Anway
     Subscription = Data.define(:topic, :queue, :event, :retry, :reserve_for)
 
     # A subclass does not inherit these keys.
-    OWN_KEYS = %i[event topics].freeze
+    OWN_KEYS = %i[event topics cron].freeze
 
     @registry = {}
     @lock = Mutex.new
@@ -67,6 +69,12 @@ module Anway
         classes.flat_map(&:subscriptions).uniq
       end
 
+      # The cron entries of all registered classes, in the format of
+      # Anway::Cron. A worker sends them with SCHEDULE when it starts.
+      def cron_entries
+        classes.flat_map(&:cron_entries).uniq
+      end
+
       # Only registered classes run. The event comes from the network, so it
       # never becomes a constant lookup. The lookup by the class name below
       # uses a registered name, and returns the newest class after a reload.
@@ -101,8 +109,8 @@ module Anway
       # Anway::Options::DECLARATION, and an unknown key raises ArgumentError.
       #
       # Without keys, returns the options of the class: the options of the
-      # parent class without event and topics, then each set in call order.
-      # event and topics are always in the result.
+      # parent class without event, topics, and cron, then each set in call
+      # order. event, topics, and cron are always in the result.
       def anway_options(**options)
         return declared_options if options.empty?
 
@@ -137,6 +145,22 @@ module Anway
             reserve_for: options[:reserve_for]
           )
         end
+      end
+
+      # One cron entry for each cron schedule. Its job has the event, queue,
+      # retry, and reserve_for of the class. Without a queue, the job goes to
+      # default.
+      def cron_entries
+        options = declared_options
+
+        job = {
+          'type' => options[:event],
+          'queue' => (options[:queue] || 'default').to_s,
+          'retry' => options[:retry],
+          'reserve_for' => options[:reserve_for]
+        }.compact
+
+        options[:cron].map { |schedule| { 'schedule' => schedule, 'job' => job } }
       end
 
       def perform_async(*args)
@@ -204,7 +228,7 @@ module Anway
       def declared_options
         parent = superclass.respond_to?(:anway_options) ? superclass.anway_options.except(*OWN_KEYS) : {}
 
-        Options.merge({ event: name, topics: [] }, parent, *@anway_option_sets).freeze
+        Options.merge({ event: name, topics: [], cron: [] }, parent, *@anway_option_sets).freeze
       end
 
       # A set with an event that another class has does not stay.

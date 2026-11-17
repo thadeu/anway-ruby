@@ -4,6 +4,7 @@ require_relative 'anway/version'
 require_relative 'anway/errors'
 require_relative 'anway/configuration'
 require_relative 'anway/options'
+require_relative 'anway/cron'
 require_relative 'anway/job'
 require_relative 'anway/connection'
 require_relative 'anway/pool'
@@ -115,6 +116,35 @@ module Anway
       end
 
       results
+    end
+
+    # Replaces all cron entries of the tag on the server. In a test mode,
+    # Anway::Testing keeps them in Testing.schedules.
+    #
+    #   Anway.schedule('shop', [{ schedule: '0 0 * * *', job: { type: 'credits.refill' } }])
+    def schedule(tag, entries)
+      testing = const_defined?(:Testing) ? Testing : nil
+
+      return testing.schedule(tag, entries) if testing&.mode
+
+      client.schedule(tag, entries)
+    end
+
+    # Removes all cron entries of the tag. A missing tag is not an error.
+    def unschedule(tag)
+      testing = const_defined?(:Testing) ? Testing : nil
+
+      return testing.unschedule(tag) if testing&.mode
+
+      client.unschedule(tag)
+    end
+
+    # The cron entries that the worker sends with SCHEDULE when it starts:
+    # those of the job classes (anway_options cron:), then those of the cron
+    # key of config/anway.yml, with no duplicates. An app spec can check its
+    # declarations with it.
+    def cron(settings = Settings.load)
+      (Worker.cron_entries + settings.cron).uniq
     end
 
     # The jobs on the server. With no set, a summary of each set. With a set

@@ -100,6 +100,7 @@ class WelcomeJob
 
   anway_options event: 'email.welcome', retry: 5
   anway_options topics: %w[user.created], queue: 'mailers'
+  anway_options cron: '0 9 * * *'
 
   def perform(user_id)
     # ...
@@ -114,7 +115,7 @@ WelcomeJob.set(queue: 'low', unique_for: 60).perform_async(1)
 - `anway_options` declares the options of the class. You can call it more than once. An unknown key raises `ArgumentError`.
 - `event` is the name of what the job handles. It goes to the server as the job type. The default is the class name. Use a name when a worker in another language runs the job.
 - Two classes with the same event raise `ArgumentError`. A worker has one class for each event.
-- A subclass inherits all options except `event` and `topics`.
+- A subclass inherits all options except `event`, `topics`, and `cron`.
 - `set` changes the options for one push. It takes the push keys below.
 - Args must be JSON types with string hash keys. Symbols, times, and objects raise `ArgumentError`.
 - Delivery is at least once, so jobs must be idempotent.
@@ -139,11 +140,12 @@ All Anway clients use the same keys. The gem translates them to the fields of th
 | `on_dead` | `custom.on_dead` | `{ event:, queue: }`. When the job dies, the server pushes a job of this event. |
 | `custom` | `custom` | The keys of your app. A key above wins over a key with the same name here. |
 | `topics` | One `SUBSCRIBE` for each topic | Only in `anway_options`. See [Topics](#topics). |
+| `cron` | One entry of a `SCHEDULE` for each schedule | A string or an array of strings. Only in `anway_options`. See [Cron](#cron). |
 
 When a class has more than one option set, the sets merge in call order:
 
 - A single value, such as `queue` or `retry`: the last set that has it wins.
-- `topics`: the topics of all sets add up, in order, with no duplicates.
+- `topics` and `cron`: the values of all sets add up, in order, with no duplicates.
 - `custom`: the hashes merge, and a later key wins.
 
 `set` merges with the options of the class by the same rules. `WelcomeJob.anway_options`, with no keys, returns the merged options.
@@ -226,6 +228,57 @@ results.reject { |result| result.error.nil? }.each { |result| Rails.logger.warn(
 - `client.publish_bulk(events)` sends one `PUBLISHB`. It takes at most 1,000 events, and more raise `ArgumentError` before the send. A bulk can make at most 10,000 jobs over all subscriptions.
 
 [docs/topics.md](docs/topics.md) explains the chat example with three apps, the options, the tests, and problems.
+
+## Cron
+
+Since 0.6.0, the app declares its cron entries in its code or in `config/anway.yml`, as Solid Queue recurring tasks do. The server keeps them for the tag of the app, also after a restart, and runs them with the cron entries of its own conf.d. You do not need access to the server files. Schedules use UTC.
+
+Declare a schedule in a job class:
+
+```ruby
+class RefillCredits
+  include Anway::Worker
+
+  anway_options event: 'credits.refill', queue: 'default', retry: 3, cron: '0 0 * * *'
+
+  def perform
+    # ...
+  end
+end
+```
+
+Or in `config/anway.yml`, in the format of the cron entries of the server conf.d:
+
+```yaml
+tag: shop
+
+cron:
+  - schedule: "0 6 * * *"
+    job:
+      type: report.daily
+      queue: reports
+      args: [7]
+```
+
+- `cron` takes a string or an array of strings. Each schedule makes one entry. Its job has the `event` of the class as its type, and the `queue`, `retry`, and `reserve_for` of the class. A job class has no args, so give args in `config/anway.yml`.
+- A YAML entry has `schedule`, and `job` with `type`, `queue`, `args`, `retry`, `reserve_for`, and `custom`. The section of an environment replaces the `cron` list at the top.
+- When it starts, the worker sends the entries of the job classes and of the file in one `SCHEDULE`, with the `tag` of `config/anway.yml`, `ANWAY_TAG`, or `--tag`. The server replaces all entries of the tag, so an entry that you remove from the code goes away at the next start.
+- **A tag is required.** With cron entries and no tag, `bin/anway` stops at start with an error. The app folder, which is the default tag in the console, is not used, because two apps can have the same folder name, such as `/rails` in Docker, and one tag would then join their entries.
+- A worker with no cron entries sends no `SCHEDULE`, so it does not remove the entries that another process sent. To remove the last entry, run `Anway.unschedule('shop')` once, for example in the Rails console.
+- All processes with one tag must declare the same entries, because the last `SCHEDULE` wins. In a Rails app, every process loads all job classes, so this is true.
+- Without a queue list, the worker also fetches the queues of the cron jobs.
+- A bad schedule or an entry with no job type stops the worker at start with `Anway::ServerError`, and the entries on the server do not change.
+- The console of the server shows each entry on the Schedules page, with its source and tag.
+
+The same operations work from any process, such as the Rails console. They use the connection of `Anway.client`:
+
+```ruby
+Anway.schedule('shop', [{ schedule: '0 0 * * *', job: { type: 'credits.refill', queue: 'default' } }])
+Anway.unschedule('shop')
+Anway.cron # => the entries that the worker of this app sends at start
+```
+
+`client.schedule(tag, entries)` and `client.unschedule(tag)` are the same commands on an `Anway::Client`. In an entry, `job: { event: }` is the same as `job: { type: }`. No entries removes the tag, and a missing tag is not an error for `unschedule`.
 
 ## Rails
 
@@ -392,6 +445,15 @@ Anway.publish('chat.message', [{ 'body' => 'hi' }])
 Anway::Testing.events.last['topic']
 
 Anway::Testing.inline!
+```
+
+Check the cron declarations of the app in a spec. `Anway.cron` returns the entries that the worker sends, from the job classes and from `config/anway.yml`. In fake and inline mode, `Anway.schedule` and `Anway.unschedule` change `Anway::Testing.schedules`, a hash of the entries of each tag, and send nothing:
+
+```ruby
+expect(Anway.cron).to include({ 'schedule' => '0 0 * * *', 'job' => { 'type' => 'credits.refill', 'queue' => 'default', 'retry' => 3 } })
+
+Anway.schedule('shop', [{ schedule: '0 0 * * *', job: { type: 'credits.refill' } }])
+Anway::Testing.schedules['shop'].size # => 1
 ```
 
 In inline mode, `Anway.publish` runs one copy in each job class of the app that subscribes to the topic. `Anway.publish_bulk` works as one `Anway.publish` for each event.

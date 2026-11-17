@@ -14,6 +14,10 @@ module Anway
   #   production:
   #     url: <%= ENV["ANWAY_URL"] %>
   #
+  #   cron:
+  #     - schedule: "0 0 * * *"
+  #       job: { type: credits.refill, queue: default }
+  #
   # The server is embedded, so the app runs it, unless a url is set in the
   # file or in ANWAY_URL. `server: { mode: }` or ANWAY_SERVER can still choose.
   class Settings
@@ -23,7 +27,7 @@ module Anway
     DEFAULT_WEB = '127.0.0.1:7420'
     DEFAULT_CONSOLE = '127.0.0.1:7421'
     MODES = %w[embedded external].freeze
-    KEYS = %w[queues concurrency timeout labels hostname tag autoscale require url server console log_tags].freeze
+    KEYS = %w[queues concurrency timeout labels hostname tag autoscale require url server console log_tags cron].freeze
     SERVER_KEYS = %w[mode bind data password web web_token].freeze
     CONSOLE_KEYS = %w[path bind api token].freeze
 
@@ -63,6 +67,13 @@ module Anway
       options[:autoscale] = autoscale
 
       options.compact
+    end
+
+    # The cron entries of the file, in the format of Anway::Cron: a list in
+    # the format of the cron entries of the server conf.d. The section of the
+    # environment replaces the list at the top.
+    def cron
+      @cron ||= Cron.entries(@values['cron'] || [])
     end
 
     # log_tags: false turns off the job tags on log lines. On by default.
@@ -230,6 +241,7 @@ module Anway
 
     def check!
       check_autoscale!
+      cron
       raise ArgumentError, "server mode must be embedded or external, not #{mode}" unless MODES.include?(mode)
       raise ArgumentError, 'an external server needs url or ANWAY_URL' if mode == 'external' && url.nil?
       raise ArgumentError, "server bind must be host:port, not #{bind}" unless split_bind.last.to_s.match?(/\A\d+\z/)
