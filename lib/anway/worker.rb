@@ -37,6 +37,7 @@ module Anway
     class << self
       def included(base)
         base.extend(ClassMethods)
+        base.extend(DSL::ClassMethods)
 
         register(base) if base.name
       end
@@ -111,9 +112,18 @@ module Anway
       # Without keys, returns the options of the class: the options of the
       # parent class without event, topics, and cron, then each set in call
       # order. event, topics, and cron are always in the result.
+      #
+      # The sets of Anway::Worker::DSL always win over the sets of
+      # anway_options, in any call order.
       def anway_options(**options)
         return declared_options if options.empty?
 
+        add_option_set(options, dsl: false)
+      end
+
+      # Adds one option set. dsl: true puts it in the sets of
+      # Anway::Worker::DSL, which merge after the anway_options sets.
+      def add_option_set(options, dsl:)
         Options.check!(options, Options::DECLARATION)
 
         # Translates the set now, so that a bad value, such as an on_dead
@@ -123,9 +133,10 @@ module Anway
         options = options.merge(event: event_name(options[:event])) if options.key?(:event)
         old_event = declared_options[:event]
 
-        (@anway_option_sets ||= []) << options.freeze
+        sets = dsl ? (@anway_dsl_sets ||= []) : (@anway_option_sets ||= [])
+        sets << options.freeze
 
-        register_event(old_event) if options.key?(:event)
+        register_event(old_event, sets) if options.key?(:event)
 
         declared_options
       end
@@ -213,6 +224,8 @@ module Anway
         Anway.push_bulk(jobs)
       end
 
+      private :add_option_set
+
       private
 
       # The event, and the push keys: the options of the class, then the
@@ -228,16 +241,16 @@ module Anway
       def declared_options
         parent = superclass.respond_to?(:anway_options) ? superclass.anway_options.except(*OWN_KEYS) : {}
 
-        Options.merge({ event: name, topics: [], cron: [] }, parent, *@anway_option_sets).freeze
+        Options.merge({ event: name, topics: [], cron: [] }, parent, *@anway_option_sets, *@anway_dsl_sets).freeze
       end
 
       # A set with an event that another class has does not stay.
-      def register_event(old_event)
+      def register_event(old_event, sets)
         return unless name
 
         Worker.register(self, old_event: old_event)
       rescue ArgumentError
-        @anway_option_sets.pop
+        sets.pop
 
         raise
       end

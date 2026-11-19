@@ -150,6 +150,32 @@ When a class has more than one option set, the sets merge in call order:
 
 `set` merges with the options of the class by the same rules. `WelcomeJob.anway_options`, with no keys, returns the merged options.
 
+### One method for each option
+
+`Anway::Worker` also gives one class method for each key of `anway_options`. You can use this style, `anway_options`, or the two together.
+
+```ruby
+class ReceiveJob
+  include Anway::Worker
+
+  event 'mail.receive'
+  queue :default
+  recover 16
+  topics 'mail.in', 'mail.bounce'
+
+  def perform(mail_id)
+    Mail.find_by(id: mail_id)
+  end
+end
+```
+
+- `retry` is a reserved word in Ruby. Use `recover`, `retries`, or `attempts`: the three names set `retry`.
+- The other methods have the name of the key: `event`, `queue`, `reserve_for`, `backtrace`, `unique_for`, `unique_until`, `expires_in`, `expires_at`, `track`, `on_dead`, `custom`, `topics`, and `cron`.
+- `topics` and `cron` take one or more values.
+- A method always wins over `anway_options`, in any call order. Two method calls merge by the merge rules.
+- A method with no value returns the option of the class: `ReceiveJob.queue # => :default`.
+
+
 To send a job that a worker in any language runs, give the event and the same push keys:
 
 ```ruby
